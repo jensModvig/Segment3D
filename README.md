@@ -17,7 +17,7 @@
 
 </div>
 
-[[Project Webpage](https://segment3d.github.io/)] &nbsp;&nbsp; [[Paper](https://arxiv.org/pdf/2312.17232)]
+[[Project Webpage](https://segment3d.github.io/)] &nbsp;&nbsp; [[Paper](https://segment3d.github.io/static/pdf/Segment3D.pdf)]
 
 ### Table of Contents
 1. [Dependencies](#dependencies)

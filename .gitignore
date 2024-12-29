@@ -1,6 +1,6 @@
 /saved
 /logs
-/data
+# /data
 /eval_output
 third_party/MinkowskiEngine
 third_party/ScanNet
