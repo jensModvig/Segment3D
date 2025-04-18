@@ -26,6 +26,8 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
+sam_folder = 'sam_gt'
+
 
 class SemanticSegmentationDataset(Dataset):
     """Docstring for SemanticSegmentationDataset."""
@@ -337,7 +339,7 @@ class SemanticSegmentationDataset(Dataset):
 
         fname = self.data[idx]
         scene_id, image_id = fname.split()
-        color_path = os.path.join(self.data_dir, 'scannet', scene_id, 'color', image_id + '.png')
+        color_path = os.path.join(self.data_dir, 'scannet', scene_id, 'color', image_id + '.jpg')
         color_image = cv2.imread(color_path)
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         color_image = cv2.resize(color_image, (640, 480))
@@ -350,7 +352,7 @@ class SemanticSegmentationDataset(Dataset):
 
         depth_intrinsic = self.depth_intrinsic
 
-        with open(os.path.join(self.data_dir, 'scannet', scene_id, 'sam', f'{image_id}.png'), 'rb') as image_file:
+        with open(os.path.join(self.data_dir, 'scannet', scene_id, sam_folder, f'{image_id}.png'), 'rb') as image_file:
             img = Image.open(image_file)
             sam_groups = np.array(img, dtype=np.int16)
 

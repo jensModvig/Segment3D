@@ -12,6 +12,7 @@ checkpoints/segment3d.ckpt
 *.out
 
 .vscode/
+/.hydra
 
 
 
