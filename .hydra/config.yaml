@@ -2,7 +2,7 @@ general:
   train_mode: true
   task: instance_segmentation
   seed: null
-  checkpoint: /cluster/nvme6/hr/Mask3D/saved/scannet_sam_20240227_041848/last.ckpt
+  checkpoint: null
   backbone_checkpoint: null
   freeze_backbone: false
   linear_probing_backbone: false
@@ -16,8 +16,8 @@ general:
   use_dbscan: false
   ignore_class_threshold: 100
   project_name: scannet
-  workspace: jonasschult
-  experiment_name: train_stage2_20240914_154910
+  workspace: thesis
+  experiment_name: train_stage1_20250421_113832
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -29,11 +29,11 @@ general:
   iou_threshold: 1.0
   area: 5
   eval_inner_core: -1
-  topk_per_image: -1
+  topk_per_image: 100
   ignore_mask_idx: []
   max_batch_size: 99999999
   save_dir: saved/${general.experiment_name}
-  gpus: 4
+  gpus: 2
 data:
   train_mode: train
   validation_mode: validation
@@ -47,8 +47,8 @@ data:
   add_instance: ${general.add_instance}
   task: ${general.task}
   pin_memory: false
-  num_workers: 2
-  batch_size: 2
+  num_workers: 4
+  batch_size: 8
   test_batch_size: 1
   cache_data: false
   voxel_size: 0.02
@@ -62,7 +62,7 @@ data:
   crop_min_size: 20000
   crop_length: 6.0
   cropping_v1: true
-  remove_small_group: 20
+  remove_small_group: 15
   generate_masks_path: data/processed/scannet_3d_masks
   use_masks_th: 150
   use_masks_score: 0.6
@@ -85,9 +85,9 @@ data:
     num_workers: ${data.num_workers}
     batch_size: ${data.test_batch_size}
   train_dataset:
-    _target_: datasets.scannet_stage2.SemanticSegmentationDataset
+    _target_: datasets.scannet_stage1.SemanticSegmentationDataset
     dataset_name: scannet
-    data_dir: data/processed/scannet200
+    data_dir: data/processed
     image_augmentations_path: conf/augmentation/albumentations_aug.yaml
     volume_augmentations_path: conf/augmentation/volumentations_aug.yaml
     label_db_filepath: data/processed/scannet200/label_database.yaml
@@ -116,9 +116,9 @@ data:
     filter_out_classes: []
     label_offset: 0
   validation_dataset:
-    _target_: datasets.scannet_stage2.SemanticSegmentationDataset
+    _target_: datasets.scannet_stage1.SemanticSegmentationDataset
     dataset_name: scannet
-    data_dir: data/processed/scannet200
+    data_dir: data/processed
     image_augmentations_path: null
     volume_augmentations_path: null
     label_db_filepath: data/processed/scannet200/label_database.yaml
@@ -138,9 +138,9 @@ data:
     filter_out_classes: []
     label_offset: 0
   test_dataset:
-    _target_: datasets.scannet_stage2.SemanticSegmentationDataset
+    _target_: datasets.scannet_stage1.SemanticSegmentationDataset
     dataset_name: scannet
-    data_dir: data/processed/scannet200
+    data_dir: data/processed
     image_augmentations_path: null
     volume_augmentations_path: null
     label_db_filepath: data/processed/scannet200/label_database.yaml
@@ -160,7 +160,7 @@ data:
     filter_out_classes: []
     label_offset: 0
   train_collation:
-    _target_: datasets.utils_stage2.VoxelizeCollate
+    _target_: datasets.utils.VoxelizeCollate
     ignore_label: ${data.ignore_label}
     voxel_size: ${data.voxel_size}
     mode: ${data.train_mode}
@@ -173,11 +173,8 @@ data:
     filter_out_classes: ${data.train_dataset.filter_out_classes}
     label_offset: ${data.train_dataset.label_offset}
     num_queries: ${model.num_queries}
-    generate_masks_path: ${data.generate_masks_path}
-    use_masks_th: ${data.use_masks_th}
-    use_masks_score: ${data.use_masks_score}
   validation_collation:
-    _target_: datasets.utils_stage2.VoxelizeCollate
+    _target_: datasets.utils.VoxelizeCollate
     ignore_label: ${data.ignore_label}
     voxel_size: ${data.voxel_size}
     mode: ${data.validation_mode}
@@ -188,11 +185,8 @@ data:
     filter_out_classes: ${data.validation_dataset.filter_out_classes}
     label_offset: ${data.validation_dataset.label_offset}
     num_queries: ${model.num_queries}
-    generate_masks_path: ${data.generate_masks_path}
-    use_masks_th: ${data.use_masks_th}
-    use_masks_score: ${data.use_masks_score}
   test_collation:
-    _target_: datasets.utils_stage2.VoxelizeCollate
+    _target_: datasets.utils.VoxelizeCollate
     ignore_label: ${data.ignore_label}
     voxel_size: ${data.voxel_size}
     mode: ${data.test_mode}
@@ -203,9 +197,6 @@ data:
     filter_out_classes: ${data.test_dataset.filter_out_classes}
     label_offset: ${data.test_dataset.label_offset}
     num_queries: ${model.num_queries}
-    generate_masks_path: ${data.generate_masks_path}
-    use_masks_th: ${data.use_masks_th}
-    use_masks_score: ${data.use_masks_score}
 logging:
 - _target_: pytorch_lightning.loggers.CSVLogger
   save_dir: ${general.save_dir}
@@ -214,7 +205,7 @@ model:
   _target_: models.Mask3D
   hidden_dim: 128
   dim_feedforward: 1024
-  num_queries: 150
+  num_queries: 100
   num_heads: 8
   num_decoders: 3
   dropout: 0.0
@@ -276,11 +267,11 @@ scheduler:
     interval: step
 trainer:
   deterministic: false
-  max_epochs: 50
+  max_epochs: 20
   min_epochs: 1
-  resume_from_checkpoint: null
-  check_val_every_n_epoch: 5
+  resume_from_checkpoint: /work3/s173955/Segment3D/saved/train_stage1_20250421_113832/resume_checkpoint.ckpt
   num_sanity_val_steps: 2
+  val_check_interval: 2000
   log_every_n_steps: 5
 callbacks:
 - _target_: pytorch_lightning.callbacks.ModelCheckpoint
@@ -295,7 +286,7 @@ callbacks:
   logging_interval: step
 matcher:
   _target_: models.matcher.HungarianMatcher
-  cost_class: 0.0
+  cost_class: 2.0
   cost_mask: 5.0
   cost_dice: 2.0
   num_points: -1

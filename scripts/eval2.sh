@@ -13,6 +13,7 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.train_mode=false \
     general.eval_on_segments=true \
     general.train_on_segments=true \
+    logging=minimal \
     model.num_queries=${CURR_QUERY} \
     general.topk_per_image=${CURR_TOPK} \
     general.use_dbscan=true \
@@ -21,11 +22,7 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.gpus=1 \
     general.save_visualizations=false \
     general.checkpoint="checkpoints/scannet_SAMGT_t1_14_epoch_stock_full.ckpt" \
-    data.remove_small_group=15 \
-    +data_batch_size=1 \
-    +data_train_dataloader_batch_size=1 \
-    data.batch_size=1 \
-    +data.train_dataloader_batch_size=1
+    data.remove_small_group=15
 
 # general.checkpoint="checkpoints/segment3d.ckpt" \
 

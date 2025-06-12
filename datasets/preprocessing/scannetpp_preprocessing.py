@@ -21,7 +21,7 @@ class ScannetPreprocessing(BasePreprocessing):
     ):
         super().__init__(data_dir, save_dir, modes, n_jobs)
 
-        with open('./data/raw/ScanNet++/metadata/semantic/instance_classes.txt', 'r') as file:
+        with open('./data/raw/ScanNet++/metadata/instance_classes.txt', 'r') as file:
             self.labels_pd = file.readlines()
         
         self.labels_pd = [x.strip() for x in self.labels_pd]

@@ -2,9 +2,9 @@
 export OMP_NUM_THREADS=3 # speeds up MinkowskiEngine
 
 # Experiment details
-EXPERIMENT_NAME="train_stage1_20250409_194708_continue"
+EXPERIMENT_NAME="train_stage1_20250421_113832"
 EXPERIMENT_DIR="/work3/s173955/Segment3D/saved/${EXPERIMENT_NAME}"
-CHECKPOINT_PATH="${EXPERIMENT_DIR}/epoch=15-val_mean_box_ap_50=0.102.ckpt"
+CHECKPOINT_PATH="${EXPERIMENT_DIR}/epoch=8-val_mean_box_ap_50=0.083.ckpt"
 
 # Verify the checkpoint exists in the new location
 if [ ! -f "$CHECKPOINT_PATH" ]; then
