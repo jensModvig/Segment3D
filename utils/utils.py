@@ -81,39 +81,22 @@ def load_backbone_checkpoint_with_missing_or_exsessive_keys(cfg, model):
 
 
 def load_checkpoint_with_missing_or_exsessive_keys(cfg, model):
-    state_dict = torch.load(cfg.general.checkpoint)["state_dict"]
-    correct_dict = dict(model.state_dict())
-
-    # if parametrs not found in checkpoint they will be randomly initialized
-    for key in correct_dict.keys():
-        if state_dict.pop(key, None) is None:
-            logger.warning(
-                f"Key not found, it will be initialized randomly: {key}"
-            )
-
-    # if parametrs have different shape, it will randomly initialize
-    state_dict = torch.load(cfg.general.checkpoint)["state_dict"]
-    correct_dict = dict(model.state_dict())
-    for key in correct_dict.keys():
-        if key not in state_dict:
-            logger.warning(f"{key} not in loaded checkpoint")
-            state_dict.update({key: correct_dict[key]})
-        elif state_dict[key].shape != correct_dict[key].shape:
-            logger.warning(
-                f"incorrect shape {key}:{state_dict[key].shape} vs {correct_dict[key].shape}"
-            )
-            state_dict.update({key: correct_dict[key]})
-
-    # if we have more keys just discard them
-    correct_dict = dict(model.state_dict())
-    new_state_dict = dict()
-    for key in state_dict.keys():
-        if key in correct_dict.keys():
-            new_state_dict.update({key: state_dict[key]})
-        else:
-            # logger.warning(f"excessive key: {key}")
-            pass
-    model.load_state_dict(new_state_dict)
+    # Load checkpoint to CPU to save memory
+    checkpoint = torch.load(cfg.general.checkpoint, map_location='cpu')
+    
+    # Extract only model weights (ignore optimizer state)
+    if 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    else:
+        state_dict = checkpoint
+    
+    # Clear checkpoint from memory immediately
+    del checkpoint
+    torch.cuda.empty_cache()
+    
+    # Load weights into model
+    model.load_state_dict(state_dict, strict=False)
+    
     return cfg, model
 
 

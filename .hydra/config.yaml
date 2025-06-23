@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: scannet
   workspace: thesis
-  experiment_name: train_stage1_20250421_113832
+  experiment_name: train_stage1_20250622_221823
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -66,6 +66,7 @@ data:
   generate_masks_path: data/processed/scannet_3d_masks
   use_masks_th: 150
   use_masks_score: 0.6
+  sam_folder: sam
   train_dataloader:
     _target_: torch.utils.data.DataLoader
     shuffle: true
@@ -99,6 +100,7 @@ data:
     add_raw_coordinates: ${data.add_raw_coordinates}
     add_colors: ${data.add_colors}
     add_normals: ${data.add_normals}
+    sam_folder: ${data.sam_folder}
     add_instance: ${data.add_instance}
     instance_oversampling: 0.0
     place_around_existing: false
@@ -198,9 +200,13 @@ data:
     label_offset: ${data.test_dataset.label_offset}
     num_queries: ${model.num_queries}
 logging:
-- _target_: pytorch_lightning.loggers.CSVLogger
-  save_dir: ${general.save_dir}
+- _target_: pytorch_lightning.loggers.WandbLogger
+  project: ${general.project_name}
   name: ${general.experiment_name}
+  save_dir: ${general.save_dir}
+  entity: jens-modvig
+  resume: allow
+  id: ${general.experiment_name}
 model:
   _target_: models.Mask3D
   hidden_dim: 128
@@ -269,10 +275,10 @@ trainer:
   deterministic: false
   max_epochs: 20
   min_epochs: 1
-  resume_from_checkpoint: /work3/s173955/Segment3D/saved/train_stage1_20250421_113832/resume_checkpoint.ckpt
+  resume_from_checkpoint: null
   num_sanity_val_steps: 2
   val_check_interval: 2000
-  log_every_n_steps: 5
+  log_every_n_steps: 50
 callbacks:
 - _target_: pytorch_lightning.callbacks.ModelCheckpoint
   monitor: val_mean_box_ap_50

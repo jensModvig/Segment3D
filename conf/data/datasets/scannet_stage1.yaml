@@ -14,6 +14,7 @@ train_dataset:
   add_raw_coordinates: ${data.add_raw_coordinates}
   add_colors: ${data.add_colors}
   add_normals: ${data.add_normals}
+  sam_folder: ${data.sam_folder}
   add_instance: ${data.add_instance}
   # different augs experiments
   instance_oversampling: 0.0

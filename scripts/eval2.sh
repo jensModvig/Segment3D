@@ -2,7 +2,7 @@
 export OMP_NUM_THREADS=3  # speeds up MinkowskiEngine
 
 CURRENT_TIME=$(date +"%Y%m%d_%H%M%S")
-CURR_QUERY=400
+CURR_QUERY=100
 CURR_TOPK=0.8
 CURR_DBSCAN=0.05
 CURR_DBSCAN_MIN_POINTS=5
@@ -13,7 +13,6 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.train_mode=false \
     general.eval_on_segments=true \
     general.train_on_segments=true \
-    logging=minimal \
     model.num_queries=${CURR_QUERY} \
     general.topk_per_image=${CURR_TOPK} \
     general.use_dbscan=true \
@@ -21,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.dbscan_min_points=${CURR_DBSCAN_MIN_POINTS} \
     general.gpus=1 \
     general.save_visualizations=false \
-    general.checkpoint="checkpoints/scannet_SAMGT_t1_14_epoch_stock_full.ckpt" \
+    general.checkpoint="checkpoints/k100/last-epoch.ckpt" \
     data.remove_small_group=15
 
 # general.checkpoint="checkpoints/segment3d.ckpt" \

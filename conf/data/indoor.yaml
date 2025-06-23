@@ -47,3 +47,4 @@ remove_small_group: 15
 generate_masks_path: "data/processed/scannet_3d_masks"
 use_masks_th: 150
 use_masks_score: 0.6
+sam_folder: "sam"

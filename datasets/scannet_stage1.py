@@ -26,8 +26,6 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
-sam_folder = 'sam_gt_new'
-
 
 class SemanticSegmentationDataset(Dataset):
     """Docstring for SemanticSegmentationDataset."""
@@ -39,6 +37,7 @@ class SemanticSegmentationDataset(Dataset):
         label_db_filepath: Optional[
             str
         ] = "configs/scannet_preprocessing/label_database.yaml",
+        sam_folder: Optional[str] = "sam",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
             (0.47793125906962, 0.4303257521323044, 0.3749598901421883),
@@ -109,6 +108,8 @@ class SemanticSegmentationDataset(Dataset):
         self.cropping_args = cropping_args
         self.is_tta = is_tta
         self.on_crops = on_crops
+        self.sam_folder = sam_folder
+        print('SAM folder is', self.sam_folder)
 
         self.crop_min_size = crop_min_size
         self.crop_length = crop_length
@@ -352,7 +353,7 @@ class SemanticSegmentationDataset(Dataset):
 
         depth_intrinsic = self.depth_intrinsic
 
-        with open(os.path.join(self.data_dir, 'scannet', scene_id, sam_folder, f'{image_id}.png'), 'rb') as image_file:
+        with open(os.path.join(self.data_dir, 'scannet', scene_id, self.sam_folder, f'{image_id}.png'), 'rb') as image_file:
             img = Image.open(image_file)
             sam_groups = np.array(img, dtype=np.int16)
 
