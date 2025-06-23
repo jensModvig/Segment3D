@@ -108,12 +108,12 @@ hydra:
     - hydra.run.dir="/work3/s173955/Segment3D"
     - hydra.job.name=train_ddp_process_1
     task:
-    - general.experiment_name=train_stage1_20250622_221823
+    - general.experiment_name=train_stage1_20250623_111111
     - general.project_name=scannet
     - optimizer.lr=0.0002
     - data.batch_size=8
     - data.num_workers=4
-    - data.sam_folder=sam
+    - data.sam_folder=sam_gt_new
     - trainer.max_epochs=20
     - trainer.log_every_n_steps=50
     - trainer.val_check_interval=2000
@@ -122,7 +122,7 @@ hydra:
     - model.num_queries=100
   job:
     name: train_ddp_process_1
-    override_dirname: data.batch_size=8,data.num_workers=4,data.sam_folder=sam,general.experiment_name=train_stage1_20250622_221823,general.gpus=2,general.project_name=scannet,general.save_visualizations=False,model.num_queries=100,optimizer.lr=0.0002,trainer.log_every_n_steps=50,trainer.max_epochs=20,trainer.val_check_interval=2000
+    override_dirname: data.batch_size=8,data.num_workers=4,data.sam_folder=sam_gt_new,general.experiment_name=train_stage1_20250623_111111,general.gpus=2,general.project_name=scannet,general.save_visualizations=False,model.num_queries=100,optimizer.lr=0.0002,trainer.log_every_n_steps=50,trainer.max_epochs=20,trainer.val_check_interval=2000
     id: ???
     num: ???
     config_name: config_base_instance_segmentation_stage1.yaml

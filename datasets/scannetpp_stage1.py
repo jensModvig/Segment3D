@@ -1,36 +1,42 @@
 import logging
-import os
 from itertools import product
 from pathlib import Path
 from random import random, sample, uniform
 from typing import List, Optional, Tuple, Union
 from random import choice
 from copy import deepcopy
-import cv2
-import numpy as np
+from random import randrange
+import os
+import numpy
 import torch
-import yaml
-import albumentations as A
-import scipy
-import volumentations as V
+from datasets.random_cuboid import RandomCuboid
 from PIL import Image
 from collections import Counter
+import albumentations as A
+import numpy as np
+import scipy
+import volumentations as V
+import yaml
+import cv2
+import copy
+
 from torch.utils.data import Dataset
-from datasets.random_cuboid import RandomCuboid
 
 logger = logging.getLogger(__name__)
 
-# You can change this name to match your custom dataset
-sam_folder = 'sam_masks'  # Folder where your SAM masks are stored
 
-class CustomScannetppStage1Dataset(Dataset):
-    """Dataset for training Stage 1 with custom data similar to ScanNet++."""
+class SemanticSegmentationDataset(Dataset):
+    """ScanNet++ Stage 1 Dataset for training with SAM masks."""
 
     def __init__(
         self,
-        dataset_name="custom_scannetpp",
-        data_dir: Optional[Union[str, Tuple[str]]] = "data/custom_scannetpp",
-        label_db_filepath: Optional[str] = "configs/custom_scannetpp/label_database.yaml",
+        dataset_name="scannetpp",
+        data_dir: Optional[Union[str, Tuple[str]]] = "data/processed/scannetpp",
+        label_db_filepath: Optional[
+            str
+        ] = "configs/scannetpp_preprocessing/label_database.yaml",
+        sam_folder: Optional[str] = "gt_mask",
+        # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
             (0.47793125906962, 0.4303257521323044, 0.3749598901421883),
             (0.2834475483823543, 0.27566157565723015, 0.27018971370874995),
@@ -40,6 +46,7 @@ class CustomScannetppStage1Dataset(Dataset):
         add_normals: Optional[bool] = True,
         add_raw_coordinates: Optional[bool] = False,
         add_instance: Optional[bool] = False,
+        num_labels: Optional[int] = -1,
         data_percent: Optional[float] = 1.0,
         ignore_label: Optional[Union[int, Tuple[int]]] = 255,
         volume_augmentations_path: Optional[str] = None,
@@ -79,20 +86,34 @@ class CustomScannetppStage1Dataset(Dataset):
         self.dataset_name = dataset_name
         self.is_elastic_distortion = is_elastic_distortion
         self.color_drop = color_drop
-        self.color_map = {0: [0, 255, 0]}  # Default color map for instances
+
+        if self.dataset_name == "scannetpp":
+            self.color_map = {0: [0, 255, 0]}
+        else:
+            assert False, "dataset not known"
+
         self.task = task
+
         self.filter_out_classes = filter_out_classes
         self.label_offset = label_offset
+
         self.area = area
         self.eval_inner_core = eval_inner_core
+
         self.reps_per_epoch = reps_per_epoch
+
         self.cropping = cropping
         self.cropping_args = cropping_args
         self.is_tta = is_tta
         self.on_crops = on_crops
+        self.sam_folder = sam_folder
+        print('SAM folder is', self.sam_folder)
+
         self.crop_min_size = crop_min_size
         self.crop_length = crop_length
+
         self.version1 = cropping_v1
+
         self.random_cuboid = RandomCuboid(
             self.crop_min_size,
             crop_length=self.crop_length,
@@ -100,12 +121,14 @@ class CustomScannetppStage1Dataset(Dataset):
         )
 
         self.mode = mode
-        self.data_dir = data_dir
+        self.data_dir = Path(data_dir)
         self.add_unlabeled_pc = add_unlabeled_pc
         if add_unlabeled_pc:
-            self.other_database = self._load_yaml(
-                Path(data_dir).parent / "matterport" / "train_database.yaml"
-            )
+            matterport_path = self.data_dir.parent / "matterport" / "train_database.yaml"
+            if not matterport_path.exists():
+                raise FileNotFoundError(f"Matterport database not found at {matterport_path}")
+            self.other_database = self._load_yaml(matterport_path)
+            
         self.ignore_label = ignore_label
         self.add_colors = add_colors
         self.add_normals = add_normals
@@ -119,52 +142,93 @@ class CustomScannetppStage1Dataset(Dataset):
         self.noise_rate = noise_rate
         self.resample_points = resample_points
 
-        # Loading scene and frame information
+        # loading database files
         self._data = []
-        
-        # ===== PLACEHOLDER: DATA LOADING =====
-        # Replace this with your own data loading logic
-        # This should load a list of scenes and image IDs to process
+        self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
+
+        # Load split file based on mode
         if self.mode == "train":
-            data_path = f'data/custom_scannetpp/splits/scannetpp_train.txt'
+            split_file = self.data_dir.parent / 'splits' / 'nvs_sem_train.txt'
+        elif self.mode == "validation":
+            split_file = self.data_dir.parent / 'splits' / 'nvs_sem_val.txt'
         else:
-            data_path = f'data/custom_scannetpp/splits/scannetpp_val.txt'
+            split_file = self.data_dir.parent / 'splits' / 'nvs_sem_test.txt'
             
-        if os.path.exists(data_path):
-            with open(data_path, "r") as scene_file:
-                self._data = scene_file.read().splitlines()
-        else:
-            # Example fallback - you should replace this with your own data
-            print(f"Warning: {data_path} not found. Using example data.")
-            self._data = ["scene0000/0000", "scene0000/0001"] 
-        # ===== END PLACEHOLDER =====
+        if not split_file.exists():
+            raise FileNotFoundError(f"Split file not found: {split_file}")
+            
+        with open(split_file, "r") as f:
+            scenes = [line.strip() for line in f if line.strip()]
+        
+        if len(scenes) == 0:
+            raise ValueError(f"No scenes found in split file: {split_file}")
+        
+        # For each scene, get all frames
+        data_subdir = self.data_dir / 'data'
+        if not data_subdir.exists():
+            raise FileNotFoundError(f"Data directory not found: {data_subdir}")
+            
+        for scene in scenes:
+            scene_path = data_subdir / scene
+            if not scene_path.exists():
+                raise FileNotFoundError(f"Scene directory not found: {scene_path}")
+            
+            # Check for required subdirectories
+            rgb_dir = scene_path / 'iphone' / 'rgb'
+            depth_dir = scene_path / 'iphone' / 'depth'
+            pose_dir = scene_path / 'iphone' / 'pose'
+            mask_dir = scene_path / self.sam_folder
+            
+            for dir_path, dir_name in [(rgb_dir, 'RGB'), (depth_dir, 'Depth'), 
+                                       (pose_dir, 'Pose'), (mask_dir, 'SAM mask')]:
+                if not dir_path.exists():
+                    raise FileNotFoundError(f"{dir_name} directory not found: {dir_path}")
+            
+            # Get all RGB files to determine frames
+            rgb_files = sorted([f for f in rgb_dir.glob('*.jpg')])
+            if len(rgb_files) == 0:
+                raise ValueError(f"No RGB images found in {rgb_dir}")
+                
+            for rgb_file in rgb_files:
+                frame_id = rgb_file.stem
+                # Check if all required files exist for this frame
+                depth_file = depth_dir / f"{frame_id}.png"
+                pose_file = pose_dir / f"{frame_id}.txt"
+                mask_file = mask_dir / f"{frame_id}.png"
+                
+                missing_files = []
+                if not depth_file.exists():
+                    missing_files.append(f"depth: {depth_file}")
+                if not pose_file.exists():
+                    missing_files.append(f"pose: {pose_file}")
+                if not mask_file.exists():
+                    missing_files.append(f"mask: {mask_file}")
+                    
+                if missing_files:
+                    raise FileNotFoundError(f"Missing files for frame {scene}/{frame_id}: " + 
+                                          ", ".join(missing_files))
+                
+                self._data.append(f"{scene} {frame_id}")
+
+        if len(self._data) == 0:
+            raise ValueError(f"No valid frames found for mode {self.mode}")
+            
+        print(f"Loaded {len(self._data)} frames for {self.mode} mode")
 
         if data_percent < 1.0:
             self._data = sample(
                 self._data, int(len(self._data) * data_percent)
             )
         
-        # Load intrinsics
-        # ===== PLACEHOLDER: INTRINSICS LOADING =====
-        # Replace this with your own camera intrinsics loading logic
-        intrinsics_path = os.path.join(self.data_dir, 'intrinsics', 'intrinsics.txt')
-        if os.path.exists(intrinsics_path):
-            self.depth_intrinsic = np.loadtxt(intrinsics_path)
-        else:
-            # Example fallback intrinsics - replace with your actual camera parameters
-            print(f"Warning: {intrinsics_path} not found. Using example intrinsics.")
-            self.depth_intrinsic = np.array([
-                [577.870, 0, 319.5, 0],
-                [0, 577.870, 239.5, 0],
-                [0, 0, 1, 0],
-                [0, 0, 0, 1]
-            ])
-        # ===== END PLACEHOLDER =====
+        # Load intrinsics for all scenes
+        self.intrinsics = {}
+        for scene in scenes:
+            intrinsics_path = data_subdir / scene / 'iphone' / 'intrinsics.txt'
+            if not intrinsics_path.exists():
+                raise FileNotFoundError(f"Intrinsics file not found: {intrinsics_path}")
+            self.intrinsics[scene] = np.loadtxt(intrinsics_path)
 
-        # Label info
-        self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
-
-        # Augmentations setup
+        # augmentations
         self.volume_augmentations = V.NoOp()
         if (volume_augmentations_path is not None) and (
             volume_augmentations_path != "none"
@@ -179,33 +243,91 @@ class CustomScannetppStage1Dataset(Dataset):
             self.image_augmentations = A.load(
                 Path(image_augmentations_path), data_format="yaml"
             )
-            
-        # Color normalization
+        # mandatory color augmentation
         if add_colors:
+            # use imagenet stats
             color_mean = (0.485, 0.456, 0.406)
             color_std = (0.229, 0.224, 0.225)
             self.normalize_color = A.Normalize(mean=color_mean, std=color_std)
 
         self.cache_data = cache_data
+        # new_data = []
+        if self.cache_data:
+            raise NotImplementedError("Cache data not implemented for ScanNet++")
 
+    def splitPointCloud(self, cloud, size=50.0, stride=50, inner_core=-1):
+        if inner_core == -1:
+            limitMax = np.amax(cloud[:, 0:3], axis=0)
+            width = int(np.ceil((limitMax[0] - size) / stride)) + 1
+            depth = int(np.ceil((limitMax[1] - size) / stride)) + 1
+            cells = [
+                (x * stride, y * stride)
+                for x in range(width)
+                for y in range(depth)
+            ]
+            blocks = []
+            for (x, y) in cells:
+                xcond = (cloud[:, 0] <= x + size) & (cloud[:, 0] >= x)
+                ycond = (cloud[:, 1] <= y + size) & (cloud[:, 1] >= y)
+                cond = xcond & ycond
+                block = cloud[cond, :]
+                blocks.append(block)
+            return blocks
+        else:
+            limitMax = np.amax(cloud[:, 0:3], axis=0)
+            width = int(np.ceil((limitMax[0] - inner_core) / stride)) + 1
+            depth = int(np.ceil((limitMax[1] - inner_core) / stride)) + 1
+            cells = [
+                (x * stride, y * stride)
+                for x in range(width)
+                for y in range(depth)
+            ]
+            blocks_outer = []
+            conds_inner = []
+            for (x, y) in cells:
+                xcond_outer = (
+                    cloud[:, 0] <= x + inner_core / 2.0 + size / 2
+                ) & (cloud[:, 0] >= x + inner_core / 2.0 - size / 2)
+                ycond_outer = (
+                    cloud[:, 1] <= y + inner_core / 2.0 + size / 2
+                ) & (cloud[:, 1] >= y + inner_core / 2.0 - size / 2)
+
+                cond_outer = xcond_outer & ycond_outer
+                block_outer = cloud[cond_outer, :]
+
+                xcond_inner = (block_outer[:, 0] <= x + inner_core) & (
+                    block_outer[:, 0] >= x
+                )
+                ycond_inner = (block_outer[:, 1] <= y + inner_core) & (
+                    block_outer[:, 1] >= y
+                )
+
+                cond_inner = xcond_inner & ycond_inner
+
+                conds_inner.append(cond_inner)
+                blocks_outer.append(block_outer)
+            return conds_inner, blocks_outer
+
+    def map2color(self, labels):
+        output_colors = list()
+
+        for label in labels:
+            output_colors.append(self.color_map[label])
+
+        return torch.tensor(output_colors)
+    
     def num_to_natural(self, group_ids):
         '''
         Change the group number to natural number arrangement
         '''
         if np.all(group_ids == -1):
             return group_ids
-        array = deepcopy(group_ids)
+        array = copy.deepcopy(group_ids)
         unique_values = np.unique(array[array != -1])
         mapping = np.full(np.max(unique_values) + 2, -1)
         mapping[unique_values + 1] = np.arange(len(unique_values))
         array = mapping[array + 1]
         return array
-
-    def map2color(self, labels):
-        output_colors = list()
-        for label in labels:
-            output_colors.append(self.color_map[label])
-        return torch.tensor(output_colors)
 
     def __len__(self):
         if self.is_tta:
@@ -218,129 +340,93 @@ class CustomScannetppStage1Dataset(Dataset):
         if self.is_tta:
             idx = idx % len(self.data)
 
-        # Get scene and frame ID
-        scene_id, image_id = self.data[idx].split('/')
+        fname = self.data[idx]
+        scene_id, image_id = fname.split()
         
-        # ===== PLACEHOLDER: LOAD RGB, DEPTH, POSE, and SAM MASKS =====
-        # Replace these paths with your own data paths
-        color_path = os.path.join(self.data_dir, scene_id, 'color', f'{image_id}.jpg')
-        depth_path = os.path.join(self.data_dir, scene_id, 'depth', f'{image_id}.png')
-        pose_path = os.path.join(self.data_dir, scene_id, 'pose', f'{image_id}.txt')
-        sam_mask_path = os.path.join(self.data_dir, scene_id, sam_folder, f'{image_id}.png')
+        # Build paths
+        base_path = self.data_dir / 'data' / scene_id
+        color_path = base_path / 'iphone' / 'rgb' / f'{image_id}.jpg'
+        depth_path = base_path / 'iphone' / 'depth' / f'{image_id}.png'
+        pose_path = base_path / 'iphone' / 'pose' / f'{image_id}.txt'
+        sam_path = base_path / self.sam_folder / f'{image_id}.png'
         
-        # Load RGB image
-        if os.path.exists(color_path):
-            color_image = cv2.imread(color_path)
-            color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-            color_image = cv2.resize(color_image, (640, 480))
-        else:
-            # Generate fake image if not found
-            print(f"Warning: {color_path} not found. Using random image.")
-            color_image = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+        # Load RGB
+        color_image = cv2.imread(str(color_path))
+        if color_image is None:
+            raise FileNotFoundError(f"Failed to load RGB image: {color_path}")
+        color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         
-        # Load depth image
-        if os.path.exists(depth_path):
-            depth_image = cv2.imread(depth_path, -1)
-        else:
-            # Generate fake depth if not found
-            print(f"Warning: {depth_path} not found. Using random depth.")
-            depth_image = np.random.randint(0, 5000, (480, 640), dtype=np.uint16)
-        
-        # Load camera pose
-        if os.path.exists(pose_path):
-            pose = np.loadtxt(pose_path)
-        else:
-            # Generate identity pose if not found
-            print(f"Warning: {pose_path} not found. Using identity pose.")
-            pose = np.eye(4)
-        
-        # Load SAM masks
-        if os.path.exists(sam_mask_path):
-            with open(sam_mask_path, 'rb') as image_file:
-                img = Image.open(image_file)
-                sam_groups = np.array(img, dtype=np.int16)
-        else:
-            # Generate empty masks if not found
-            print(f"Warning: {sam_mask_path} not found. Using empty masks.")
-            sam_groups = np.zeros((480, 640), dtype=np.int16) - 1
-        # ===== END PLACEHOLDER =====
+        # Load depth
+        depth_image = cv2.imread(str(depth_path), cv2.IMREAD_ANYDEPTH)
+        if depth_image is None:
+            raise FileNotFoundError(f"Failed to load depth image: {depth_path}")
 
-        # Create a mask for valid depth values
+        # Load pose
+        pose = np.loadtxt(pose_path)
+        if pose.shape != (4, 4):
+            raise ValueError(f"Invalid pose shape {pose.shape} for {pose_path}")
+
+        # Load intrinsics
+        depth_intrinsic = self.intrinsics[scene_id]
+
+        # Load SAM masks
+        with open(sam_path, 'rb') as image_file:
+            img = Image.open(image_file)
+            sam_groups = np.array(img, dtype=np.int16)
+
+        # Process point cloud
         mask = (depth_image != 0)
-        colors = np.reshape(color_image[mask], [-1, 3])
-        
-        # Extract SAM groups for valid depth points
+        colors = color_image[mask]
         sam_groups = sam_groups[mask]
+
+        # Depth to 3D conversion
+        depth_shift = 1000.0
+        y, x = np.where(mask)
+        z = depth_image[mask] / depth_shift
         
-        # Convert to natural numbers (consecutive instance IDs)
+        fx = depth_intrinsic[0, 0]
+        fy = depth_intrinsic[1, 1]
+        cx = depth_intrinsic[0, 2]
+        cy = depth_intrinsic[1, 2]
+        
+        # Convert to camera coordinates
+        X = (x - cx) * z / fx
+        Y = (y - cy) * z / fy
+        
+        # Create homogeneous coordinates
+        points = np.ones((len(X), 4))
+        points[:, 0] = X
+        points[:, 1] = Y
+        points[:, 2] = z
+        
+        # Transform to world coordinates
+        points_world = np.dot(points, pose.T)
+        
+        # Process instance masks
         sam_groups = self.num_to_natural(sam_groups)
         
-        # Filter out instances with too few points (less than 100)
+        # Filter small instances
         counts = Counter(sam_groups)
         for num, count in counts.items():
             if count < 100:
                 sam_groups[sam_groups == num] = -1
         sam_groups = self.num_to_natural(sam_groups)
 
-        # Convert depth to 3D points
-        # ===== PLACEHOLDER: DEPTH TO POINT CLOUD CONVERSION =====
-        # This is a standard depth-to-pointcloud conversion, but you might need
-        # to adjust it based on your specific depth format and camera intrinsics
-        depth_shift = 1000.0  # Adjust based on your depth units
-        x, y = np.meshgrid(
-            np.linspace(0, depth_image.shape[1]-1, depth_image.shape[1]),
-            np.linspace(0, depth_image.shape[0]-1, depth_image.shape[0])
-        )
-        uv_depth = np.zeros((depth_image.shape[0], depth_image.shape[1], 3))
-        uv_depth[:,:,0] = x
-        uv_depth[:,:,1] = y
-        uv_depth[:,:,2] = depth_image / depth_shift
-        uv_depth = np.reshape(uv_depth, [-1, 3])
-        uv_depth = uv_depth[np.where(uv_depth[:,2]!=0),:].squeeze()
-        
-        # Extract camera parameters
-        fx = self.depth_intrinsic[0,0]
-        fy = self.depth_intrinsic[1,1]
-        cx = self.depth_intrinsic[0,2]
-        cy = self.depth_intrinsic[1,2]
-        bx = self.depth_intrinsic[0,3] if self.depth_intrinsic.shape[1] > 3 else 0
-        by = self.depth_intrinsic[1,3] if self.depth_intrinsic.shape[1] > 3 else 0
-        
-        # Project to 3D
-        n = uv_depth.shape[0]
-        points = np.ones((n, 4))
-        X = (uv_depth[:,0] - cx) * uv_depth[:,2] / fx + bx
-        Y = (uv_depth[:,1] - cy) * uv_depth[:,2] / fy + by
-        points[:,0] = X
-        points[:,1] = Y
-        points[:,2] = uv_depth[:,2]
-        
-        # Transform to world coordinates using camera pose
-        points_world = np.dot(points, np.transpose(pose))
-        # ===== END PLACEHOLDER =====
-
-        # Prepare data arrays
-        coordinates = points_world[:,:3]
+        coordinates = points_world[:, :3]
         color = colors
-        normals = np.ones_like(coordinates)  # Default normals pointing up
+        normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
-        labels = np.concatenate([
-            np.zeros(coordinates.shape[0]).reshape(-1, 1),  # Semantic labels (all 0 for instance segmentation)
-            sam_groups.reshape(-1, 1)                      # Instance labels from SAM
-        ], axis=1)
+        labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
 
-        # Save original data
         raw_coordinates = coordinates.copy()
         raw_color = color
         raw_normals = normals
 
-        # If colors not needed, use ones
         if not self.add_colors:
             color = np.ones((len(color), 3))
 
-        # Apply training augmentations
+        # volume and image augmentations for train
         if "train" in self.mode or self.is_tta:
-            # Random cuboid cropping
             if self.cropping:
                 new_idx = self.random_cuboid(
                     coordinates,
@@ -354,8 +440,8 @@ class CustomScannetppStage1Dataset(Dataset):
                 raw_color = raw_color[new_idx]
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
-            
-            # Center the point cloud
+                points = points[new_idx]
+
             coordinates -= coordinates.mean(0)
             try:
                 coordinates += (
@@ -367,7 +453,6 @@ class CustomScannetppStage1Dataset(Dataset):
                 print(coordinates.shape)
                 raise err
 
-            # Instance oversampling if enabled
             if self.instance_oversampling > 0.0:
                 (
                     coordinates,
@@ -382,25 +467,20 @@ class CustomScannetppStage1Dataset(Dataset):
                     self.instance_oversampling,
                 )
 
-            # Flip in center if enabled
             if self.flip_in_center:
                 coordinates = flip_in_center(coordinates)
 
-            # Random flipping
             for i in (0, 1):
                 if random() < 0.5:
                     coord_max = np.max(coordinates[:, i])
                     coordinates[:, i] = coord_max - coordinates[:, i]
 
-            # Elastic distortion
             if random() < 0.95:
                 if self.is_elastic_distortion:
                     for granularity, magnitude in ((0.2, 0.4), (0.8, 1.6)):
                         coordinates = elastic_distortion(
                             coordinates, granularity, magnitude
                         )
-            
-            # Volume augmentations
             aug = self.volume_augmentations(
                 points=coordinates,
                 normals=normals,
@@ -413,18 +493,16 @@ class CustomScannetppStage1Dataset(Dataset):
                 aug["normals"],
                 aug["labels"],
             )
-            
-            # Image augmentations
             pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
             color = np.squeeze(
                 self.image_augmentations(image=pseudo_image)["image"]
             )
 
-            # Random region cutting
             if self.point_per_cut != 0:
                 number_of_cuts = int(len(coordinates) / self.point_per_cut)
                 for _ in range(number_of_cuts):
                     size_of_cut = np.random.uniform(0.05, self.max_cut_region)
+                    # not wall, floor or empty
                     point = choice(coordinates)
                     x_min = point[0] - size_of_cut
                     x_max = x_min + size_of_cut
@@ -442,7 +520,6 @@ class CustomScannetppStage1Dataset(Dataset):
                         labels[~indexes],
                     )
 
-            # Point resampling or noise
             if (self.resample_points > 0) or (self.noise_rate > 0):
                 coordinates, color, normals, labels = random_around_points(
                     coordinates,
@@ -454,18 +531,78 @@ class CustomScannetppStage1Dataset(Dataset):
                     self.ignore_label,
                 )
 
-            # Color drop
+            if self.add_unlabeled_pc:
+                if random() < 0.8:
+                    new_points = np.load(
+                        self.other_database[
+                            np.random.randint(0, len(self.other_database) - 1)
+                        ]["filepath"]
+                    )
+                    (
+                        unlabeled_coords,
+                        unlabeled_color,
+                        unlabeled_normals,
+                        unlabeled_labels,
+                    ) = (
+                        new_points[:, :3],
+                        new_points[:, 3:6],
+                        new_points[:, 6:9],
+                        new_points[:, 9:],
+                    )
+                    unlabeled_coords -= unlabeled_coords.mean(0)
+                    unlabeled_coords += (
+                        np.random.uniform(
+                            unlabeled_coords.min(0), unlabeled_coords.max(0)
+                        )
+                        / 2
+                    )
+
+                    aug = self.volume_augmentations(
+                        points=unlabeled_coords,
+                        normals=unlabeled_normals,
+                        features=unlabeled_color,
+                        labels=unlabeled_labels,
+                    )
+                    (
+                        unlabeled_coords,
+                        unlabeled_color,
+                        unlabeled_normals,
+                        unlabeled_labels,
+                    ) = (
+                        aug["points"],
+                        aug["features"],
+                        aug["normals"],
+                        aug["labels"],
+                    )
+                    pseudo_image = unlabeled_color.astype(np.uint8)[
+                        np.newaxis, :, :
+                    ]
+                    unlabeled_color = np.squeeze(
+                        self.image_augmentations(image=pseudo_image)["image"]
+                    )
+
+                    coordinates = np.concatenate(
+                        (coordinates, unlabeled_coords)
+                    )
+                    color = np.concatenate((color, unlabeled_color))
+                    normals = np.concatenate((normals, unlabeled_normals))
+                    labels = np.concatenate(
+                        (
+                            labels,
+                            np.full_like(unlabeled_labels, self.ignore_label),
+                        )
+                    )
+
             if random() < self.color_drop:
                 color[:] = 255
 
-        # Color normalization
+        # normalize color information
         pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
         color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
-        
-        # Prepare final labels and features
+        # prepare labels and map from 0 to 20(40)
         labels = labels.astype(np.int32)
         labels = np.hstack((labels, segments[..., None].astype(np.int32)))
-        
+
         features = color
         if self.add_normals:
             features = np.hstack((features, normals))
@@ -474,6 +611,7 @@ class CustomScannetppStage1Dataset(Dataset):
                 features = np.hstack((features[None, ...], coordinates))
             else:
                 features = np.hstack((features, coordinates))
+
 
         return (
             coordinates,
@@ -488,7 +626,7 @@ class CustomScannetppStage1Dataset(Dataset):
 
     @property
     def data(self):
-        """database file containing information about preprocessed dataset"""
+        """database file containing information about preproscessed dataset"""
         return self._data
 
     @property
@@ -499,8 +637,36 @@ class CustomScannetppStage1Dataset(Dataset):
     @staticmethod
     def _load_yaml(filepath):
         with open(filepath) as f:
-            file = yaml.safe_load(f)
+            # file = yaml.load(f, Loader=Loader)
+            file = yaml.load(f)
         return file
+
+    def _select_correct_labels(self, labels, num_labels):
+        number_of_validation_labels = 0
+        number_of_all_labels = 0
+        for (
+            k,
+            v,
+        ) in labels.items():
+            number_of_all_labels += 1
+            if v["validation"]:
+                number_of_validation_labels += 1
+
+        if num_labels == number_of_all_labels:
+            return labels
+        elif num_labels == number_of_validation_labels:
+            valid_labels = dict()
+            for (
+                k,
+                v,
+            ) in labels.items():
+                if v["validation"]:
+                    valid_labels.update({k: v})
+            return valid_labels
+        else:
+            msg = f"""not available number labels, select from:
+            {number_of_validation_labels}, {number_of_all_labels}"""
+            raise ValueError(msg)
 
     def _remap_from_zero(self, labels):
         labels[
@@ -521,6 +687,9 @@ class CustomScannetppStage1Dataset(Dataset):
     def augment_individual_instance(
         self, coordinates, color, normals, labels, oversampling=1.0
     ):
+        if self.instance_oversampling == 0:
+            return coordinates, color, normals, labels
+            
         max_instance = int(len(np.unique(labels[:, 1])))
         # randomly selecting half of non-zero instances
         for instance in range(0, int(max_instance * oversampling)):
@@ -534,165 +703,14 @@ class CustomScannetppStage1Dataset(Dataset):
                 center = np.array(
                     [uniform(-5, 5), uniform(-5, 5), uniform(-0.5, 2)]
                 )
+            
+            if not hasattr(self, 'instance_data'):
+                raise AttributeError("Instance oversampling enabled but no instance_data loaded")
+                
             instance = choice(choice(self.instance_data))
             instance = np.load(instance["instance_filepath"])
             # centering two objects
             instance[:, :3] = (
                 instance[:, :3] - instance[:, :3].mean(axis=0) + center
             )
-            max_instance = max_instance + 1
-            instance[:, -1] = max_instance
-            aug = V.Compose(
-                [
-                    V.Scale3d(),
-                    V.RotateAroundAxis3d(
-                        rotation_limit=np.pi / 24, axis=(1, 0, 0)
-                    ),
-                    V.RotateAroundAxis3d(
-                        rotation_limit=np.pi / 24, axis=(0, 1, 0)
-                    ),
-                    V.RotateAroundAxis3d(rotation_limit=np.pi, axis=(0, 0, 1)),
-                ]
-            )(
-                points=instance[:, :3],
-                features=instance[:, 3:6],
-                normals=instance[:, 6:9],
-                labels=instance[:, 9:],
-            )
-            coordinates = np.concatenate((coordinates, aug["points"]))
-            color = np.concatenate((color, aug["features"]))
-            normals = np.concatenate((normals, aug["normals"]))
-            labels = np.concatenate((labels, aug["labels"]))
-
-        return coordinates, color, normals, labels
-
-
-# Helper functions (same as original)
-def elastic_distortion(pointcloud, granularity, magnitude):
-    """Apply elastic distortion on sparse coordinate space."""
-    blurx = np.ones((3, 1, 1, 1)).astype("float32") / 3
-    blury = np.ones((1, 3, 1, 1)).astype("float32") / 3
-    blurz = np.ones((1, 1, 3, 1)).astype("float32") / 3
-    coords = pointcloud[:, :3]
-    coords_min = coords.min(0)
-
-    noise_dim = ((coords - coords_min).max(0) // granularity).astype(int) + 3
-    noise = np.random.randn(*noise_dim, 3).astype(np.float32)
-
-    for _ in range(2):
-        noise = scipy.ndimage.filters.convolve(noise, blurx, mode="constant", cval=0)
-        noise = scipy.ndimage.filters.convolve(noise, blury, mode="constant", cval=0)
-        noise = scipy.ndimage.filters.convolve(noise, blurz, mode="constant", cval=0)
-
-    ax = [
-        np.linspace(d_min, d_max, d)
-        for d_min, d_max, d in zip(
-            coords_min - granularity,
-            coords_min + granularity * (noise_dim - 2),
-            noise_dim,
-        )
-    ]
-    interp = scipy.interpolate.RegularGridInterpolator(
-        ax, noise, bounds_error=0, fill_value=0
-    )
-    pointcloud[:, :3] = coords + interp(coords) * magnitude
-    return pointcloud
-
-def crop(points, x_min, y_min, z_min, x_max, y_max, z_max):
-    """Crop points within the given 3D box."""
-    if x_max <= x_min or y_max <= y_min or z_max <= z_min:
-        raise ValueError(
-            "We should have x_min < x_max and y_min < y_max and z_min < z_max."
-        )
-    inds = np.all(
-        [
-            (points[:, 0] >= x_min),
-            (points[:, 0] < x_max),
-            (points[:, 1] >= y_min),
-            (points[:, 1] < y_max),
-            (points[:, 2] >= z_min),
-            (points[:, 2] < z_max),
-        ],
-        axis=0,
-    )
-    return inds
-
-def flip_in_center(coordinates):
-    """Flip point cloud in center."""
-    coordinates -= coordinates.mean(0)
-    aug = V.Compose(
-        [
-            V.Flip3d(axis=(0, 1, 0), always_apply=True),
-            V.Flip3d(axis=(1, 0, 0), always_apply=True),
-        ]
-    )
-
-    first_crop = coordinates[:, 0] > 0
-    first_crop &= coordinates[:, 1] > 0
-    second_crop = coordinates[:, 0] > 0
-    second_crop &= coordinates[:, 1] < 0
-    third_crop = coordinates[:, 0] < 0
-    third_crop &= coordinates[:, 1] > 0
-    fourth_crop = coordinates[:, 0] < 0
-    fourth_crop &= coordinates[:, 1] < 0
-
-    if first_crop.size > 1:
-        coordinates[first_crop] = aug(points=coordinates[first_crop])["points"]
-    if second_crop.size > 1:
-        minimum = coordinates[second_crop].min(0)
-        minimum[2] = 0
-        minimum[0] = 0
-        coordinates[second_crop] = aug(points=coordinates[second_crop])["points"]
-        coordinates[second_crop] += minimum
-    if third_crop.size > 1:
-        minimum = coordinates[third_crop].min(0)
-        minimum[2] = 0
-        minimum[1] = 0
-        coordinates[third_crop] = aug(points=coordinates[third_crop])["points"]
-        coordinates[third_crop] += minimum
-    if fourth_crop.size > 1:
-        minimum = coordinates[fourth_crop].min(0)
-        minimum[2] = 0
-        coordinates[fourth_crop] = aug(points=coordinates[fourth_crop])["points"]
-        coordinates[fourth_crop] += minimum
-
-    return coordinates
-
-def random_around_points(
-    coordinates,
-    color,
-    normals,
-    labels,
-    rate=0.2,
-    noise_rate=0,
-    ignore_label=255,
-):
-    """Add random points around existing points."""
-    coord_indexes = sample(
-        list(range(len(coordinates))), k=int(len(coordinates) * rate)
-    )
-    noisy_coordinates = deepcopy(coordinates[coord_indexes])
-    noisy_coordinates += np.random.uniform(
-        -0.2 - noise_rate, 0.2 + noise_rate, size=noisy_coordinates.shape
-    )
-
-    if noise_rate > 0:
-        noisy_color = np.random.randint(0, 255, size=noisy_coordinates.shape)
-        noisy_normals = np.random.rand(*noisy_coordinates.shape) * 2 - 1
-        noisy_labels = np.full(labels[coord_indexes].shape, ignore_label)
-
-        coordinates = np.vstack((coordinates, noisy_coordinates))
-        color = np.vstack((color, noisy_color))
-        normals = np.vstack((normals, noisy_normals))
-        labels = np.vstack((labels, noisy_labels))
-    else:
-        noisy_color = deepcopy(color[coord_indexes])
-        noisy_normals = deepcopy(normals[coord_indexes])
-        noisy_labels = deepcopy(labels[coord_indexes])
-
-        coordinates = np.vstack((coordinates, noisy_coordinates))
-        color = np.vstack((color, noisy_color))
-        normals = np.vstack((normals, noisy_normals))
-        labels = np.vstack((labels, noisy_labels))
-
-    return coordinates, color, normals, labels
+            max
