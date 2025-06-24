@@ -19,14 +19,18 @@ import volumentations as V
 import yaml
 import cv2
 import copy
+import json
+
+# Import the provided utilities
+from thes.paths import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
 
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
 
-class SemanticSegmentationDataset(Dataset):
-    """ScanNet++ Stage 1 Dataset for training with SAM masks."""
+class ScannetppStage1Dataset(Dataset):
+    """ScanNet++ Stage1 Dataset for training on 2D SAM masks."""
 
     def __init__(
         self,
@@ -34,7 +38,7 @@ class SemanticSegmentationDataset(Dataset):
         data_dir: Optional[Union[str, Tuple[str]]] = "data/processed/scannetpp",
         label_db_filepath: Optional[
             str
-        ] = "configs/scannetpp_preprocessing/label_database.yaml",
+        ] = "data/processed/scannetpp/label_database.yaml",
         sam_folder: Optional[str] = "gt_mask",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
@@ -121,13 +125,10 @@ class SemanticSegmentationDataset(Dataset):
         )
 
         self.mode = mode
-        self.data_dir = Path(data_dir)
+        self.data_dir = data_dir
         self.add_unlabeled_pc = add_unlabeled_pc
         if add_unlabeled_pc:
-            matterport_path = self.data_dir.parent / "matterport" / "train_database.yaml"
-            if not matterport_path.exists():
-                raise FileNotFoundError(f"Matterport database not found at {matterport_path}")
-            self.other_database = self._load_yaml(matterport_path)
+            raise NotImplementedError("add_unlabeled_pc not implemented for ScanNet++")
             
         self.ignore_label = ignore_label
         self.add_colors = add_colors
@@ -142,91 +143,19 @@ class SemanticSegmentationDataset(Dataset):
         self.noise_rate = noise_rate
         self.resample_points = resample_points
 
-        # loading database files
-        self._data = []
+        # Discover scene/frame pairs using iterate_scannetpp
+        self._data = self._discover_scene_frame_pairs()
+        
+        # Load labels (simplified for binary classification)
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
 
-        # Load split file based on mode
-        if self.mode == "train":
-            split_file = self.data_dir.parent / 'splits' / 'nvs_sem_train.txt'
-        elif self.mode == "validation":
-            split_file = self.data_dir.parent / 'splits' / 'nvs_sem_val.txt'
-        else:
-            split_file = self.data_dir.parent / 'splits' / 'nvs_sem_test.txt'
-            
-        if not split_file.exists():
-            raise FileNotFoundError(f"Split file not found: {split_file}")
-            
-        with open(split_file, "r") as f:
-            scenes = [line.strip() for line in f if line.strip()]
+        # Load scene metadata (intrinsics and poses)
+        self.scene_metadata = self._load_scene_metadata()
         
-        if len(scenes) == 0:
-            raise ValueError(f"No scenes found in split file: {split_file}")
-        
-        # For each scene, get all frames
-        data_subdir = self.data_dir / 'data'
-        if not data_subdir.exists():
-            raise FileNotFoundError(f"Data directory not found: {data_subdir}")
-            
-        for scene in scenes:
-            scene_path = data_subdir / scene
-            if not scene_path.exists():
-                raise FileNotFoundError(f"Scene directory not found: {scene_path}")
-            
-            # Check for required subdirectories
-            rgb_dir = scene_path / 'iphone' / 'rgb'
-            depth_dir = scene_path / 'iphone' / 'depth'
-            pose_dir = scene_path / 'iphone' / 'pose'
-            mask_dir = scene_path / self.sam_folder
-            
-            for dir_path, dir_name in [(rgb_dir, 'RGB'), (depth_dir, 'Depth'), 
-                                       (pose_dir, 'Pose'), (mask_dir, 'SAM mask')]:
-                if not dir_path.exists():
-                    raise FileNotFoundError(f"{dir_name} directory not found: {dir_path}")
-            
-            # Get all RGB files to determine frames
-            rgb_files = sorted([f for f in rgb_dir.glob('*.jpg')])
-            if len(rgb_files) == 0:
-                raise ValueError(f"No RGB images found in {rgb_dir}")
-                
-            for rgb_file in rgb_files:
-                frame_id = rgb_file.stem
-                # Check if all required files exist for this frame
-                depth_file = depth_dir / f"{frame_id}.png"
-                pose_file = pose_dir / f"{frame_id}.txt"
-                mask_file = mask_dir / f"{frame_id}.png"
-                
-                missing_files = []
-                if not depth_file.exists():
-                    missing_files.append(f"depth: {depth_file}")
-                if not pose_file.exists():
-                    missing_files.append(f"pose: {pose_file}")
-                if not mask_file.exists():
-                    missing_files.append(f"mask: {mask_file}")
-                    
-                if missing_files:
-                    raise FileNotFoundError(f"Missing files for frame {scene}/{frame_id}: " + 
-                                          ", ".join(missing_files))
-                
-                self._data.append(f"{scene} {frame_id}")
-
-        if len(self._data) == 0:
-            raise ValueError(f"No valid frames found for mode {self.mode}")
-            
-        print(f"Loaded {len(self._data)} frames for {self.mode} mode")
-
         if data_percent < 1.0:
             self._data = sample(
                 self._data, int(len(self._data) * data_percent)
             )
-        
-        # Load intrinsics for all scenes
-        self.intrinsics = {}
-        for scene in scenes:
-            intrinsics_path = data_subdir / scene / 'iphone' / 'intrinsics.txt'
-            if not intrinsics_path.exists():
-                raise FileNotFoundError(f"Intrinsics file not found: {intrinsics_path}")
-            self.intrinsics[scene] = np.loadtxt(intrinsics_path)
 
         # augmentations
         self.volume_augmentations = V.NoOp()
@@ -251,62 +180,171 @@ class SemanticSegmentationDataset(Dataset):
             self.normalize_color = A.Normalize(mean=color_mean, std=color_std)
 
         self.cache_data = cache_data
-        # new_data = []
-        if self.cache_data:
-            raise NotImplementedError("Cache data not implemented for ScanNet++")
 
-    def splitPointCloud(self, cloud, size=50.0, stride=50, inner_core=-1):
-        if inner_core == -1:
-            limitMax = np.amax(cloud[:, 0:3], axis=0)
-            width = int(np.ceil((limitMax[0] - size) / stride)) + 1
-            depth = int(np.ceil((limitMax[1] - size) / stride)) + 1
-            cells = [
-                (x * stride, y * stride)
-                for x in range(width)
-                for y in range(depth)
-            ]
-            blocks = []
-            for (x, y) in cells:
-                xcond = (cloud[:, 0] <= x + size) & (cloud[:, 0] >= x)
-                ycond = (cloud[:, 1] <= y + size) & (cloud[:, 1] >= y)
-                cond = xcond & ycond
-                block = cloud[cond, :]
-                blocks.append(block)
-            return blocks
-        else:
-            limitMax = np.amax(cloud[:, 0:3], axis=0)
-            width = int(np.ceil((limitMax[0] - inner_core) / stride)) + 1
-            depth = int(np.ceil((limitMax[1] - inner_core) / stride)) + 1
-            cells = [
-                (x * stride, y * stride)
-                for x in range(width)
-                for y in range(depth)
-            ]
-            blocks_outer = []
-            conds_inner = []
-            for (x, y) in cells:
-                xcond_outer = (
-                    cloud[:, 0] <= x + inner_core / 2.0 + size / 2
-                ) & (cloud[:, 0] >= x + inner_core / 2.0 - size / 2)
-                ycond_outer = (
-                    cloud[:, 1] <= y + inner_core / 2.0 + size / 2
-                ) & (cloud[:, 1] >= y + inner_core / 2.0 - size / 2)
+    def _discover_scene_frame_pairs(self):
+        """Discover valid scene/frame pairs using iterate_scannetpp"""
+        pairs = []
+        missing_scenes = []
+        scenes_with_missing_dirs = []
+        scenes_with_no_frames = []
+        
+        # Map mode to scannetpp splits
+        split_map = {"train": "train", "validation": "val", "val": "val"}
+        split = split_map.get(self.mode, self.mode)
+        
+        # Use the provided utility to get scenes for this split
+        scene_count = 0
+        for raw_scene_path, processed_scene_path in iterate_scannetpp(split):
+            scene_count += 1
+            scene_id = raw_scene_path.name
+            
+            # Check if raw scene exists
+            if not raw_scene_path.exists():
+                missing_scenes.append(scene_id)
+                continue
+                
+            # Check if processed scene exists
+            if not processed_scene_path.exists():
+                missing_scenes.append(scene_id)
+                continue
+            
+            # Check if processed directories exist
+            rgb_dir = processed_scene_path / "iphone" / "rgb"
+            depth_dir = processed_scene_path / "iphone" / "depth"
+            mask_dir = processed_scene_path / self.sam_folder
+            
+            missing_dirs = []
+            if not rgb_dir.exists():
+                missing_dirs.append("rgb")
+            if not depth_dir.exists():
+                missing_dirs.append("depth")
+            if not mask_dir.exists():
+                missing_dirs.append(self.sam_folder)
+                
+            if missing_dirs:
+                scenes_with_missing_dirs.append(f"{scene_id} (missing: {', '.join(missing_dirs)})")
+                continue
+                
+            # Find common frame names
+            rgb_frames = {f.stem for f in rgb_dir.glob("*.jpg")}
+            if not rgb_frames:
+                rgb_frames = {f.stem for f in rgb_dir.glob("*.png")}
+            depth_frames = {f.stem for f in depth_dir.glob("*.png")}
+            mask_frames = {f.stem for f in mask_dir.glob("*.png")}
+            
+            common_frames = rgb_frames & depth_frames & mask_frames
+            
+            if not common_frames:
+                scenes_with_no_frames.append(f"{scene_id} (RGB: {len(rgb_frames)}, Depth: {len(depth_frames)}, Masks: {len(mask_frames)})")
+                continue
+                
+            # Add all valid pairs
+            for frame_id in sorted(common_frames):
+                pairs.append(f"{scene_id} {frame_id}")
+        
+        # Report any issues
+        if missing_scenes:
+            raise FileNotFoundError(f"Missing {len(missing_scenes)} scenes for split '{self.mode}': {missing_scenes[:10]}{'...' if len(missing_scenes) > 10 else ''}")
+            
+        if scenes_with_missing_dirs:
+            raise FileNotFoundError(f"Scenes with missing directories: {scenes_with_missing_dirs[:5]}{'...' if len(scenes_with_missing_dirs) > 5 else ''}")
+            
+        if scenes_with_no_frames:
+            raise FileNotFoundError(f"Scenes with no matching frames: {scenes_with_no_frames[:5]}{'...' if len(scenes_with_no_frames) > 5 else ''}")
+        
+        if not pairs:
+            raise ValueError(f"No valid scene/frame pairs found for split '{self.mode}'. Expected {scene_count} scenes.")
+                
+        print(f"Found {len(pairs)} valid scene/frame pairs for split '{self.mode}' from {scene_count} scenes")
+        return pairs
 
-                cond_outer = xcond_outer & ycond_outer
-                block_outer = cloud[cond_outer, :]
-
-                xcond_inner = (block_outer[:, 0] <= x + inner_core) & (
-                    block_outer[:, 0] >= x
-                )
-                ycond_inner = (block_outer[:, 1] <= y + inner_core) & (
-                    block_outer[:, 1] >= y
-                )
-
-                cond_inner = xcond_inner & ycond_inner
-
-                conds_inner.append(cond_inner)
-                blocks_outer.append(block_outer)
-            return conds_inner, blocks_outer
+    def _load_scene_metadata(self):
+        """Load intrinsics and poses for all scenes"""
+        metadata = {}
+        
+        split_map = {"train": "train", "validation": "val", "val": "val"}
+        split = split_map.get(self.mode, self.mode)
+        
+        for raw_scene_path, _ in iterate_scannetpp(split):
+            scene_id = raw_scene_path.name
+            
+            # Check if raw scene path exists
+            if not raw_scene_path.exists():
+                raise FileNotFoundError(f"Raw scene directory not found: {raw_scene_path}")
+            
+            # Load pose_intrinsic_imu.json from raw directory
+            pose_intrinsic_file = raw_scene_path / "iphone" / "pose_intrinsic_imu.json"
+            
+            if not pose_intrinsic_file.exists():
+                raise FileNotFoundError(f"Missing pose_intrinsic_imu.json for scene {scene_id}: {pose_intrinsic_file}")
+            
+            try:
+                with open(pose_intrinsic_file, 'r') as f:
+                    data = json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in pose_intrinsic_imu.json for scene {scene_id}: {e}")
+            except Exception as e:
+                raise IOError(f"Error reading pose_intrinsic_imu.json for scene {scene_id}: {e}")
+                
+            # Extract intrinsics (3x3 matrix)
+            if "intrinsic" not in data:
+                raise NotImplementedError(f"No 'intrinsic' key found in pose_intrinsic_imu.json for scene {scene_id}")
+            
+            try:
+                intrinsics = np.array(data["intrinsic"])
+                if intrinsics.shape != (3, 3):
+                    raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsics.shape} for scene {scene_id}")
+            except Exception as e:
+                raise ValueError(f"Error parsing intrinsics for scene {scene_id}: {e}")
+                
+            # Extract poses (use aligned_poses if available, otherwise poses)
+            poses_data = data.get("aligned_poses", data.get("poses", []))
+            if not poses_data:
+                raise NotImplementedError(f"No 'aligned_poses' or 'poses' found in pose_intrinsic_imu.json for scene {scene_id}")
+            
+            # Create frame_id to pose mapping
+            frame_to_pose = {}
+            try:
+                for i, pose_data in enumerate(poses_data):
+                    if isinstance(pose_data, dict) and "pose" in pose_data:
+                        # If pose_data has frame info
+                        frame_id = str(pose_data.get("frame_id", i)).zfill(6)
+                        pose_matrix = np.array(pose_data["pose"])
+                        if pose_matrix.shape == (4, 4):
+                            frame_to_pose[frame_id] = pose_matrix
+                        elif pose_matrix.shape == (16,):
+                            frame_to_pose[frame_id] = pose_matrix.reshape(4, 4)
+                        else:
+                            raise ValueError(f"Invalid pose shape {pose_matrix.shape} for frame {frame_id}")
+                    elif isinstance(pose_data, list) and len(pose_data) == 16:
+                        # If pose_data is directly a 4x4 matrix flattened
+                        frame_id = str(i).zfill(6)
+                        frame_to_pose[frame_id] = np.array(pose_data).reshape(4, 4)
+                    elif isinstance(pose_data, list) and len(pose_data) == 4:
+                        # If pose_data is a 4x4 matrix as nested lists
+                        frame_id = str(i).zfill(6)
+                        pose_matrix = np.array(pose_data)
+                        if pose_matrix.shape == (4, 4):
+                            frame_to_pose[frame_id] = pose_matrix
+                        else:
+                            raise ValueError(f"Invalid nested pose shape {pose_matrix.shape} for frame {frame_id}")
+                    else:
+                        print(f"Warning: Skipping pose {i} for scene {scene_id} - unexpected format")
+            except Exception as e:
+                raise ValueError(f"Error parsing poses for scene {scene_id}: {e}")
+            
+            if not frame_to_pose:
+                raise ValueError(f"No valid poses found for scene {scene_id}")
+                    
+            metadata[scene_id] = {
+                "intrinsics": intrinsics,
+                "frame_to_pose": frame_to_pose
+            }
+            
+        if not metadata:
+            raise ValueError(f"No scene metadata loaded for split '{self.mode}'")
+            
+        return metadata
 
     def map2color(self, labels):
         output_colors = list()
@@ -331,81 +369,164 @@ class SemanticSegmentationDataset(Dataset):
 
     def __len__(self):
         if self.is_tta:
-            return 5 * len(self.data)
+            return 5 * len(self._data)
         else:
-            return self.reps_per_epoch * len(self.data)
+            return self.reps_per_epoch * len(self._data)
 
     def __getitem__(self, idx: int):
-        idx = idx % len(self.data)
+        idx = idx % len(self._data)
         if self.is_tta:
-            idx = idx % len(self.data)
+            idx = idx % len(self._data)
 
-        fname = self.data[idx]
-        scene_id, image_id = fname.split()
+        fname = self._data[idx]
+        scene_id, frame_id = fname.split()
         
-        # Build paths
-        base_path = self.data_dir / 'data' / scene_id
-        color_path = base_path / 'iphone' / 'rgb' / f'{image_id}.jpg'
-        depth_path = base_path / 'iphone' / 'depth' / f'{image_id}.png'
-        pose_path = base_path / 'iphone' / 'pose' / f'{image_id}.txt'
-        sam_path = base_path / self.sam_folder / f'{image_id}.png'
+        # Get paths for this scene
+        raw_scene_path = scannetpp_raw_dir / "data" / scene_id
+        processed_scene_path = scannetpp_processed_dir / "data" / scene_id
+        
+        # Verify scene directories exist
+        if not raw_scene_path.exists():
+            raise FileNotFoundError(f"Raw scene directory not found: {raw_scene_path}")
+        if not processed_scene_path.exists():
+            raise FileNotFoundError(f"Processed scene directory not found: {processed_scene_path}")
         
         # Load RGB
-        color_image = cv2.imread(str(color_path))
-        if color_image is None:
-            raise FileNotFoundError(f"Failed to load RGB image: {color_path}")
-        color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        color_path = processed_scene_path / "iphone" / "rgb" / f"{frame_id}.jpg"
+        if not color_path.exists():
+            color_path = processed_scene_path / "iphone" / "rgb" / f"{frame_id}.png"
+            
+        if not color_path.exists():
+            raise FileNotFoundError(f"RGB frame not found for scene {scene_id}, frame {frame_id}. Checked: {processed_scene_path / 'iphone' / 'rgb' / frame_id}.jpg and .png")
         
-        # Load depth
-        depth_image = cv2.imread(str(depth_path), cv2.IMREAD_ANYDEPTH)
-        if depth_image is None:
-            raise FileNotFoundError(f"Failed to load depth image: {depth_path}")
+        try:
+            color_image = cv2.imread(str(color_path))
+            if color_image is None:
+                raise ValueError(f"Failed to load RGB image (cv2.imread returned None): {color_path}")
+            color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+            color_image = cv2.resize(color_image, (640, 480))
+        except Exception as e:
+            raise IOError(f"Error loading RGB image {color_path}: {e}")
 
-        # Load pose
-        pose = np.loadtxt(pose_path)
+        # Load Depth - critical file that must exist and be valid
+        depth_path = processed_scene_path / "iphone" / "depth" / f"{frame_id}.png"
+        if not depth_path.exists():
+            raise FileNotFoundError(f"Depth image not found for scene {scene_id}, frame {frame_id}: {depth_path}")
+        
+        try:
+            depth_image = cv2.imread(str(depth_path), -1)
+            if depth_image is None:
+                raise ValueError(f"Failed to load depth image (cv2.imread returned None): {depth_path}")
+            
+            # Validate depth image
+            if depth_image.dtype != np.uint16:
+                print(f"Warning: Depth image has unexpected dtype {depth_image.dtype}, expected uint16: {depth_path}")
+            
+            if depth_image.size == 0:
+                raise ValueError(f"Depth image is empty: {depth_path}")
+                
+        except Exception as e:
+            raise IOError(f"Error loading depth image {depth_path}: {e}")
+
+        # Get pose from metadata
+        if scene_id not in self.scene_metadata:
+            raise FileNotFoundError(f"No metadata loaded for scene {scene_id}")
+            
+        scene_meta = self.scene_metadata[scene_id]
+        
+        # Find pose for this frame
+        if frame_id not in scene_meta["frame_to_pose"]:
+            # Try different frame ID formats
+            alt_frame_ids = [
+                frame_id.lstrip('0') if frame_id != '0' else '0',
+                str(int(frame_id)),
+                frame_id.zfill(6),
+                frame_id.zfill(8)
+            ]
+            
+            found_pose = None
+            for alt_id in alt_frame_ids:
+                if alt_id in scene_meta["frame_to_pose"]:
+                    found_pose = scene_meta["frame_to_pose"][alt_id]
+                    break
+                    
+            if found_pose is None:
+                available_frames = list(scene_meta["frame_to_pose"].keys())[:10]
+                raise FileNotFoundError(f"No pose found for scene {scene_id}, frame {frame_id}. Tried formats: {alt_frame_ids}. Available frames (first 10): {available_frames}")
+            else:
+                pose = found_pose
+        else:
+            pose = scene_meta["frame_to_pose"][frame_id]
+
+        # Validate pose
         if pose.shape != (4, 4):
-            raise ValueError(f"Invalid pose shape {pose.shape} for {pose_path}")
+            raise ValueError(f"Invalid pose shape {pose.shape} for scene {scene_id}, frame {frame_id}. Expected (4, 4)")
 
-        # Load intrinsics
-        depth_intrinsic = self.intrinsics[scene_id]
+        # Use scene-specific intrinsics
+        depth_intrinsic = scene_meta["intrinsics"]
 
-        # Load SAM masks
-        with open(sam_path, 'rb') as image_file:
-            img = Image.open(image_file)
-            sam_groups = np.array(img, dtype=np.int16)
+        # Load SAM mask
+        sam_path = processed_scene_path / self.sam_folder / f"{frame_id}.png"
+        if not sam_path.exists():
+            raise FileNotFoundError(f"SAM mask not found for scene {scene_id}, frame {frame_id}: {sam_path}")
+        
+        try:
+            with open(sam_path, 'rb') as image_file:
+                img = Image.open(image_file)
+                sam_groups = np.array(img, dtype=np.int16)
+                
+            if sam_groups.size == 0:
+                raise ValueError(f"SAM mask is empty: {sam_path}")
+                
+        except Exception as e:
+            raise IOError(f"Error loading SAM mask {sam_path}: {e}")
 
-        # Process point cloud
+        # Validate depth mask and check for valid depth values
         mask = (depth_image != 0)
-        colors = color_image[mask]
-        sam_groups = sam_groups[mask]
+        if not np.any(mask):
+            raise ValueError(f"Depth image contains no valid depth values (all zeros): {depth_path}")
+        
+        try:
+            colors = np.reshape(color_image[mask], [-1, 3])
+            sam_groups = sam_groups[mask]
+        except Exception as e:
+            raise ValueError(f"Error applying depth mask for scene {scene_id}, frame {frame_id}: {e}")
 
-        # Depth to 3D conversion
         depth_shift = 1000.0
-        y, x = np.where(mask)
-        z = depth_image[mask] / depth_shift
+        x, y = np.meshgrid(
+            np.linspace(0, depth_image.shape[1] - 1, depth_image.shape[1]), 
+            np.linspace(0, depth_image.shape[0] - 1, depth_image.shape[0])
+        )
+        uv_depth = np.zeros((depth_image.shape[0], depth_image.shape[1], 3))
+        uv_depth[:, :, 0] = x
+        uv_depth[:, :, 1] = y
+        uv_depth[:, :, 2] = depth_image / depth_shift
+        uv_depth = np.reshape(uv_depth, [-1, 3])
+        uv_depth = uv_depth[np.where(uv_depth[:, 2] != 0), :].squeeze()
+        
+        if uv_depth.size == 0:
+            raise ValueError(f"No valid depth points after filtering for scene {scene_id}, frame {frame_id}")
         
         fx = depth_intrinsic[0, 0]
         fy = depth_intrinsic[1, 1]
         cx = depth_intrinsic[0, 2]
         cy = depth_intrinsic[1, 2]
         
-        # Convert to camera coordinates
-        X = (x - cx) * z / fx
-        Y = (y - cy) * z / fy
-        
-        # Create homogeneous coordinates
-        points = np.ones((len(X), 4))
+        n = uv_depth.shape[0]
+        points = np.ones((n, 4))
+        X = (uv_depth[:, 0] - cx) * uv_depth[:, 2] / fx
+        Y = (uv_depth[:, 1] - cy) * uv_depth[:, 2] / fy
         points[:, 0] = X
         points[:, 1] = Y
-        points[:, 2] = z
+        points[:, 2] = uv_depth[:, 2]
         
-        # Transform to world coordinates
-        points_world = np.dot(points, pose.T)
-        
-        # Process instance masks
+        try:
+            points_world = np.dot(points, np.transpose(pose))
+        except Exception as e:
+            raise ValueError(f"Error transforming points to world coordinates for scene {scene_id}, frame {frame_id}: {e}")
+            
         sam_groups = self.num_to_natural(sam_groups)
-        
-        # Filter small instances
+
         counts = Counter(sam_groups)
         for num, count in counts.items():
             if count < 100:
@@ -417,6 +538,10 @@ class SemanticSegmentationDataset(Dataset):
         normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
         labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
+
+        # Validate final point cloud
+        if coordinates.shape[0] == 0:
+            raise ValueError(f"No valid points generated for scene {scene_id}, frame {frame_id}")
 
         raw_coordinates = coordinates.copy()
         raw_color = color
@@ -440,7 +565,6 @@ class SemanticSegmentationDataset(Dataset):
                 raw_color = raw_color[new_idx]
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
-                points = points[new_idx]
 
             coordinates -= coordinates.mean(0)
             try:
@@ -454,18 +578,7 @@ class SemanticSegmentationDataset(Dataset):
                 raise err
 
             if self.instance_oversampling > 0.0:
-                (
-                    coordinates,
-                    color,
-                    normals,
-                    labels,
-                ) = self.augment_individual_instance(
-                    coordinates,
-                    color,
-                    normals,
-                    labels,
-                    self.instance_oversampling,
-                )
+                raise NotImplementedError("Instance oversampling not implemented for ScanNet++")
 
             if self.flip_in_center:
                 coordinates = flip_in_center(coordinates)
@@ -531,68 +644,6 @@ class SemanticSegmentationDataset(Dataset):
                     self.ignore_label,
                 )
 
-            if self.add_unlabeled_pc:
-                if random() < 0.8:
-                    new_points = np.load(
-                        self.other_database[
-                            np.random.randint(0, len(self.other_database) - 1)
-                        ]["filepath"]
-                    )
-                    (
-                        unlabeled_coords,
-                        unlabeled_color,
-                        unlabeled_normals,
-                        unlabeled_labels,
-                    ) = (
-                        new_points[:, :3],
-                        new_points[:, 3:6],
-                        new_points[:, 6:9],
-                        new_points[:, 9:],
-                    )
-                    unlabeled_coords -= unlabeled_coords.mean(0)
-                    unlabeled_coords += (
-                        np.random.uniform(
-                            unlabeled_coords.min(0), unlabeled_coords.max(0)
-                        )
-                        / 2
-                    )
-
-                    aug = self.volume_augmentations(
-                        points=unlabeled_coords,
-                        normals=unlabeled_normals,
-                        features=unlabeled_color,
-                        labels=unlabeled_labels,
-                    )
-                    (
-                        unlabeled_coords,
-                        unlabeled_color,
-                        unlabeled_normals,
-                        unlabeled_labels,
-                    ) = (
-                        aug["points"],
-                        aug["features"],
-                        aug["normals"],
-                        aug["labels"],
-                    )
-                    pseudo_image = unlabeled_color.astype(np.uint8)[
-                        np.newaxis, :, :
-                    ]
-                    unlabeled_color = np.squeeze(
-                        self.image_augmentations(image=pseudo_image)["image"]
-                    )
-
-                    coordinates = np.concatenate(
-                        (coordinates, unlabeled_coords)
-                    )
-                    color = np.concatenate((color, unlabeled_color))
-                    normals = np.concatenate((normals, unlabeled_normals))
-                    labels = np.concatenate(
-                        (
-                            labels,
-                            np.full_like(unlabeled_labels, self.ignore_label),
-                        )
-                    )
-
             if random() < self.color_drop:
                 color[:] = 255
 
@@ -612,12 +663,11 @@ class SemanticSegmentationDataset(Dataset):
             else:
                 features = np.hstack((features, coordinates))
 
-
         return (
             coordinates,
             features,
             labels,
-            f'{scene_id}/{image_id}',
+            f'{scene_id}/{frame_id}',
             raw_color,
             raw_normals,
             raw_coordinates,
@@ -637,8 +687,7 @@ class SemanticSegmentationDataset(Dataset):
     @staticmethod
     def _load_yaml(filepath):
         with open(filepath) as f:
-            # file = yaml.load(f, Loader=Loader)
-            file = yaml.load(f)
+            file = yaml.load(f, Loader=yaml.SafeLoader)
         return file
 
     def _select_correct_labels(self, labels, num_labels):
@@ -684,33 +733,205 @@ class SemanticSegmentationDataset(Dataset):
             output_remapped[output == i] = k
         return output_remapped
 
-    def augment_individual_instance(
-        self, coordinates, color, normals, labels, oversampling=1.0
-    ):
-        if self.instance_oversampling == 0:
-            return coordinates, color, normals, labels
-            
-        max_instance = int(len(np.unique(labels[:, 1])))
-        # randomly selecting half of non-zero instances
-        for instance in range(0, int(max_instance * oversampling)):
-            if self.place_around_existing:
-                center = choice(
-                    coordinates[
-                        labels[:, 1] == choice(np.unique(labels[:, 1]))
-                    ]
-                )
-            else:
-                center = np.array(
-                    [uniform(-5, 5), uniform(-5, 5), uniform(-0.5, 2)]
-                )
-            
-            if not hasattr(self, 'instance_data'):
-                raise AttributeError("Instance oversampling enabled but no instance_data loaded")
-                
-            instance = choice(choice(self.instance_data))
-            instance = np.load(instance["instance_filepath"])
-            # centering two objects
-            instance[:, :3] = (
-                instance[:, :3] - instance[:, :3].mean(axis=0) + center
+
+def elastic_distortion(pointcloud, granularity, magnitude):
+    """Apply elastic distortion on sparse coordinate space.
+
+    pointcloud: numpy array of (number of points, at least 3 spatial dims)
+    granularity: size of the noise grid (in same scale[m/cm] as the voxel grid)
+    magnitude: noise multiplier
+    """
+    blurx = np.ones((3, 1, 1, 1)).astype("float32") / 3
+    blury = np.ones((1, 3, 1, 1)).astype("float32") / 3
+    blurz = np.ones((1, 1, 3, 1)).astype("float32") / 3
+    coords = pointcloud[:, :3]
+    coords_min = coords.min(0)
+
+    # Create Gaussian noise tensor of the size given by granularity.
+    noise_dim = ((coords - coords_min).max(0) // granularity).astype(int) + 3
+    noise = np.random.randn(*noise_dim, 3).astype(np.float32)
+
+    # Smoothing.
+    for _ in range(2):
+        noise = scipy.ndimage.filters.convolve(
+            noise, blurx, mode="constant", cval=0
+        )
+        noise = scipy.ndimage.filters.convolve(
+            noise, blury, mode="constant", cval=0
+        )
+        noise = scipy.ndimage.filters.convolve(
+            noise, blurz, mode="constant", cval=0
+        )
+
+    # Trilinear interpolate noise filters for each spatial dimensions.
+    ax = [
+        np.linspace(d_min, d_max, d)
+        for d_min, d_max, d in zip(
+            coords_min - granularity,
+            coords_min + granularity * (noise_dim - 2),
+            noise_dim,
+        )
+    ]
+    interp = scipy.interpolate.RegularGridInterpolator(
+        ax, noise, bounds_error=0, fill_value=0
+    )
+    pointcloud[:, :3] = coords + interp(coords) * magnitude
+    return pointcloud
+
+
+def crop(points, x_min, y_min, z_min, x_max, y_max, z_max):
+    if x_max <= x_min or y_max <= y_min or z_max <= z_min:
+        raise ValueError(
+            "We should have x_min < x_max and y_min < y_max and z_min < z_max. But we got"
+            " (x_min = {x_min}, y_min = {y_min}, z_min = {z_min},"
+            " x_max = {x_max}, y_max = {y_max}, z_max = {z_max})".format(
+                x_min=x_min,
+                x_max=x_max,
+                y_min=y_min,
+                y_max=y_max,
+                z_min=z_min,
+                z_max=z_max,
             )
-            max
+        )
+    inds = np.all(
+        [
+            (points[:, 0] >= x_min),
+            (points[:, 0] < x_max),
+            (points[:, 1] >= y_min),
+            (points[:, 1] < y_max),
+            (points[:, 2] >= z_min),
+            (points[:, 2] < z_max),
+        ],
+        axis=0,
+    )
+    return inds
+
+
+def flip_in_center(coordinates):
+    # moving coordinates to center
+    coordinates -= coordinates.mean(0)
+    aug = V.Compose(
+        [
+            V.Flip3d(axis=(0, 1, 0), always_apply=True),
+            V.Flip3d(axis=(1, 0, 0), always_apply=True),
+        ]
+    )
+
+    first_crop = coordinates[:, 0] > 0
+    first_crop &= coordinates[:, 1] > 0
+    # x -y
+    second_crop = coordinates[:, 0] > 0
+    second_crop &= coordinates[:, 1] < 0
+    # -x y
+    third_crop = coordinates[:, 0] < 0
+    third_crop &= coordinates[:, 1] > 0
+    # -x -y
+    fourth_crop = coordinates[:, 0] < 0
+    fourth_crop &= coordinates[:, 1] < 0
+
+    if first_crop.size > 1:
+        coordinates[first_crop] = aug(points=coordinates[first_crop])["points"]
+    if second_crop.size > 1:
+        minimum = coordinates[second_crop].min(0)
+        minimum[2] = 0
+        minimum[0] = 0
+        coordinates[second_crop] = aug(points=coordinates[second_crop])[
+            "points"
+        ]
+        coordinates[second_crop] += minimum
+    if third_crop.size > 1:
+        minimum = coordinates[third_crop].min(0)
+        minimum[2] = 0
+        minimum[1] = 0
+        coordinates[third_crop] = aug(points=coordinates[third_crop])["points"]
+        coordinates[third_crop] += minimum
+    if fourth_crop.size > 1:
+        minimum = coordinates[fourth_crop].min(0)
+        minimum[2] = 0
+        coordinates[fourth_crop] = aug(points=coordinates[fourth_crop])[
+            "points"
+        ]
+        coordinates[fourth_crop] += minimum
+
+    return coordinates
+
+
+def random_around_points(
+    coordinates,
+    color,
+    normals,
+    labels,
+    rate=0.2,
+    noise_rate=0,
+    ignore_label=255,
+):
+    coord_indexes = sample(
+        list(range(len(coordinates))), k=int(len(coordinates) * rate)
+    )
+    noisy_coordinates = deepcopy(coordinates[coord_indexes])
+    noisy_coordinates += np.random.uniform(
+        -0.2 - noise_rate, 0.2 + noise_rate, size=noisy_coordinates.shape
+    )
+
+    if noise_rate > 0:
+        noisy_color = np.random.randint(0, 255, size=noisy_coordinates.shape)
+        noisy_normals = np.random.rand(*noisy_coordinates.shape) * 2 - 1
+        noisy_labels = np.full(labels[coord_indexes].shape, ignore_label)
+
+        coordinates = np.vstack((coordinates, noisy_coordinates))
+        color = np.vstack((color, noisy_color))
+        normals = np.vstack((normals, noisy_normals))
+        labels = np.vstack((labels, noisy_labels))
+    else:
+        noisy_color = deepcopy(color[coord_indexes])
+        noisy_normals = deepcopy(normals[coord_indexes])
+        noisy_labels = deepcopy(labels[coord_indexes])
+
+        coordinates = np.vstack((coordinates, noisy_coordinates))
+        color = np.vstack((color, noisy_color))
+        normals = np.vstack((normals, noisy_normals))
+        labels = np.vstack((labels, noisy_labels))
+
+    return coordinates, color, normals, labels
+
+
+def random_points(
+    coordinates, color, normals, labels, noise_rate=0.6, ignore_label=255
+):
+    max_boundary = coordinates.max(0) + 0.1
+    min_boundary = coordinates.min(0) - 0.1
+
+    noisy_coordinates = int(
+        (max(max_boundary) - min(min_boundary)) / noise_rate
+    )
+
+    noisy_coordinates = np.array(
+        list(
+            product(
+                np.linspace(
+                    min_boundary[0], max_boundary[0], noisy_coordinates
+                ),
+                np.linspace(
+                    min_boundary[1], max_boundary[1], noisy_coordinates
+                ),
+                np.linspace(
+                    min_boundary[2], max_boundary[2], noisy_coordinates
+                ),
+            )
+        )
+    )
+    noisy_coordinates += np.random.uniform(
+        -noise_rate, noise_rate, size=noisy_coordinates.shape
+    )
+
+    noisy_color = np.random.randint(0, 255, size=noisy_coordinates.shape)
+    noisy_normals = np.random.rand(*noisy_coordinates.shape) * 2 - 1
+    noisy_labels = np.full(
+        (noisy_coordinates.shape[0], labels.shape[1]), ignore_label
+    )
+
+    coordinates = np.vstack((coordinates, noisy_coordinates))
+    color = np.vstack((color, noisy_color))
+    normals = np.vstack((normals, noisy_normals))
+    labels = np.vstack((labels, noisy_labels))
+    return coordinates, color, normals, labels
