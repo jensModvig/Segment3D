@@ -40,6 +40,7 @@ class ScannetppStage1Dataset(Dataset):
             str
         ] = "data/processed/scannetpp/label_database.yaml",
         sam_folder: Optional[str] = "gt_mask",
+        scenes_to_exclude: str = "",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
             (0.47793125906962, 0.4303257521323044, 0.3749598901421883),
@@ -112,6 +113,8 @@ class ScannetppStage1Dataset(Dataset):
         self.on_crops = on_crops
         self.sam_folder = sam_folder
         print('SAM folder is', self.sam_folder)
+
+        self.excluded_scenes = set(scene.strip() for scene in scenes_to_exclude.split(',') if scene.strip())
 
         self.crop_min_size = crop_min_size
         self.crop_length = crop_length
@@ -198,6 +201,10 @@ class ScannetppStage1Dataset(Dataset):
             scene_count += 1
             scene_id = raw_scene_path.name
             
+            # Skip excluded scenes
+            if scene_id in self.excluded_scenes:
+                continue
+            
             # Check if raw scene exists
             if not raw_scene_path.exists():
                 missing_scenes.append(scene_id)
@@ -267,6 +274,10 @@ class ScannetppStage1Dataset(Dataset):
         
         for raw_scene_path, _ in iterate_scannetpp(split):
             scene_id = raw_scene_path.name
+            
+            # Skip excluded scenes
+            if scene_id in self.excluded_scenes:
+                continue
             
             # Check if raw scene path exists
             if not raw_scene_path.exists():

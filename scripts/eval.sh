@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.dbscan_min_points=${CURR_DBSCAN_MIN_POINTS} \
     general.gpus=1 \
     general.save_visualizations=false \
-    general.checkpoint="checkpoints/segment3d.ckpt" \
+    general.checkpoint="checkpoints/ctoGTSAM_e11_train_stage1_20250623_111111.ckpt" \
     data.remove_small_group=15
 
 

@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: scannet
   workspace: thesis
-  experiment_name: train_stage1_20250622_221823
+  experiment_name: train_stage1_20250623_111111
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -66,7 +66,7 @@ data:
   generate_masks_path: data/processed/scannet_3d_masks
   use_masks_th: 150
   use_masks_score: 0.6
-  sam_folder: sam
+  sam_folder: sam_gt_new
   train_dataloader:
     _target_: torch.utils.data.DataLoader
     shuffle: true

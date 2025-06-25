@@ -18,6 +18,7 @@ CUDA_VISIBLE_DEVICES=0,1 python main_instance_segmentation_stage1.py \
     general.experiment_name="train_stage1_${DATASET}_${CURRENT_TIME}" \
     general.project_name="${DATASET}" \
     data/datasets=${DATASET_CONFIG} \
+    +data.train_dataset.scenes_to_exclude=\'dfac5b38df,00dd871005\' \
     optimizer.lr=0.0002 \
     data.batch_size=8 \
     data.num_workers=4 \
