@@ -296,60 +296,58 @@ class ScannetppStage1Dataset(Dataset):
                 raise ValueError(f"Invalid JSON in pose_intrinsic_imu.json for scene {scene_id}: {e}")
             except Exception as e:
                 raise IOError(f"Error reading pose_intrinsic_imu.json for scene {scene_id}: {e}")
-                
-            # Extract intrinsics (3x3 matrix)
-            if "intrinsic" not in data:
-                raise NotImplementedError(f"No 'intrinsic' key found in pose_intrinsic_imu.json for scene {scene_id}")
             
-            try:
-                intrinsics = np.array(data["intrinsic"])
-                if intrinsics.shape != (3, 3):
-                    raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsics.shape} for scene {scene_id}")
-            except Exception as e:
-                raise ValueError(f"Error parsing intrinsics for scene {scene_id}: {e}")
-                
-            # Extract poses (use aligned_poses if available, otherwise poses)
-            poses_data = data.get("aligned_poses", data.get("poses", []))
-            if not poses_data:
-                raise NotImplementedError(f"No 'aligned_poses' or 'poses' found in pose_intrinsic_imu.json for scene {scene_id}")
-            
-            # Create frame_id to pose mapping
+            # Extract frame data - each frame has its own intrinsic and pose
             frame_to_pose = {}
+            frame_to_intrinsic = {}
+            
             try:
-                for i, pose_data in enumerate(poses_data):
-                    if isinstance(pose_data, dict) and "pose" in pose_data:
-                        # If pose_data has frame info
-                        frame_id = str(pose_data.get("frame_id", i)).zfill(6)
-                        pose_matrix = np.array(pose_data["pose"])
+                for frame_key, frame_data in data.items():
+                    if not isinstance(frame_data, dict):
+                        continue
+                    
+                    # Extract frame ID from frame_key (e.g., "frame_000000" -> "000000")
+                    if frame_key.startswith("frame_"):
+                        frame_id = frame_key.replace("frame_", "")
+                    else:
+                        # Handle other possible frame key formats
+                        frame_id = frame_key
+                    
+                    # Extract intrinsic matrix for this frame
+                    if "intrinsic" in frame_data:
+                        intrinsic_matrix = np.array(frame_data["intrinsic"])
+                        if intrinsic_matrix.shape != (3, 3):
+                            raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsic_matrix.shape} for scene {scene_id}, frame {frame_id}")
+                        frame_to_intrinsic[frame_id] = intrinsic_matrix
+                    
+                    # Extract pose matrix for this frame (prefer aligned_pose if available)
+                    pose_matrix = None
+                    if "aligned_pose" in frame_data:
+                        pose_matrix = np.array(frame_data["aligned_pose"])
+                    elif "pose" in frame_data:
+                        pose_matrix = np.array(frame_data["pose"])
+                    
+                    if pose_matrix is not None:
                         if pose_matrix.shape == (4, 4):
                             frame_to_pose[frame_id] = pose_matrix
                         elif pose_matrix.shape == (16,):
                             frame_to_pose[frame_id] = pose_matrix.reshape(4, 4)
                         else:
-                            raise ValueError(f"Invalid pose shape {pose_matrix.shape} for frame {frame_id}")
-                    elif isinstance(pose_data, list) and len(pose_data) == 16:
-                        # If pose_data is directly a 4x4 matrix flattened
-                        frame_id = str(i).zfill(6)
-                        frame_to_pose[frame_id] = np.array(pose_data).reshape(4, 4)
-                    elif isinstance(pose_data, list) and len(pose_data) == 4:
-                        # If pose_data is a 4x4 matrix as nested lists
-                        frame_id = str(i).zfill(6)
-                        pose_matrix = np.array(pose_data)
-                        if pose_matrix.shape == (4, 4):
-                            frame_to_pose[frame_id] = pose_matrix
-                        else:
-                            raise ValueError(f"Invalid nested pose shape {pose_matrix.shape} for frame {frame_id}")
-                    else:
-                        print(f"Warning: Skipping pose {i} for scene {scene_id} - unexpected format")
+                            raise ValueError(f"Invalid pose shape {pose_matrix.shape} for scene {scene_id}, frame {frame_id}")
+                            
             except Exception as e:
-                raise ValueError(f"Error parsing poses for scene {scene_id}: {e}")
+                raise ValueError(f"Error parsing frame data for scene {scene_id}: {e}")
             
             if not frame_to_pose:
                 raise ValueError(f"No valid poses found for scene {scene_id}")
-                    
+            
+            if not frame_to_intrinsic:
+                raise ValueError(f"No valid intrinsics found for scene {scene_id}")
+            
+            # Store both poses and intrinsics per frame
             metadata[scene_id] = {
-                "intrinsics": intrinsics,
-                "frame_to_pose": frame_to_pose
+                "frame_to_pose": frame_to_pose,
+                "frame_to_intrinsic": frame_to_intrinsic
             }
             
         if not metadata:
