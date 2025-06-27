@@ -20,6 +20,7 @@ import yaml
 import cv2
 import copy
 import json
+import re
 
 # Import the provided utilities
 from thes.paths import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
@@ -28,9 +29,13 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
+pointcloud_dims = (256, 192)
+
 
 class ScannetppStage1Dataset(Dataset):
     """ScanNet++ Stage1 Dataset for training on 2D SAM masks."""
+    
+    _excluded_scenes = set()
 
     def __init__(
         self,
@@ -81,6 +86,7 @@ class ScannetppStage1Dataset(Dataset):
         add_clip=False,
         is_elastic_distortion=True,
         color_drop=0.0,
+        max_frames: Optional[int] = None,
     ):
         assert task in [
             "instance_segmentation",
@@ -91,6 +97,7 @@ class ScannetppStage1Dataset(Dataset):
         self.dataset_name = dataset_name
         self.is_elastic_distortion = is_elastic_distortion
         self.color_drop = color_drop
+        self.max_frames = max_frames
 
         if self.dataset_name == "scannetpp":
             self.color_map = {0: [0, 255, 0]}
@@ -114,7 +121,9 @@ class ScannetppStage1Dataset(Dataset):
         self.sam_folder = sam_folder
         print('SAM folder is', self.sam_folder)
 
-        self.excluded_scenes = set(scene.strip() for scene in scenes_to_exclude.split(',') if scene.strip())
+        if scenes_to_exclude:
+            ScannetppStage1Dataset._excluded_scenes.update(scene.strip() for scene in scenes_to_exclude.split(',') if scene.strip())
+        self.excluded_scenes = ScannetppStage1Dataset._excluded_scenes
 
         self.crop_min_size = crop_min_size
         self.crop_length = crop_length
@@ -185,85 +194,106 @@ class ScannetppStage1Dataset(Dataset):
         self.cache_data = cache_data
 
     def _discover_scene_frame_pairs(self):
-        """Discover valid scene/frame pairs using iterate_scannetpp"""
         pairs = []
-        missing_scenes = []
-        scenes_with_missing_dirs = []
-        scenes_with_no_frames = []
+        total_rgb_count = 0
+        scene_data = []
         
-        # Map mode to scannetpp splits
         split_map = {"train": "train", "validation": "val", "val": "val"}
         split = split_map.get(self.mode, self.mode)
         
-        # Use the provided utility to get scenes for this split
-        scene_count = 0
         for raw_scene_path, processed_scene_path in iterate_scannetpp(split):
-            scene_count += 1
             scene_id = raw_scene_path.name
             
-            # Skip excluded scenes
             if scene_id in self.excluded_scenes:
                 continue
             
-            # Check if raw scene exists
-            if not raw_scene_path.exists():
-                missing_scenes.append(scene_id)
-                continue
-                
-            # Check if processed scene exists
-            if not processed_scene_path.exists():
-                missing_scenes.append(scene_id)
-                continue
-            
-            # Check if processed directories exist
             rgb_dir = processed_scene_path / "iphone" / "rgb"
-            depth_dir = processed_scene_path / "iphone" / "depth"
-            mask_dir = processed_scene_path / self.sam_folder
-            
-            missing_dirs = []
             if not rgb_dir.exists():
-                missing_dirs.append("rgb")
-            if not depth_dir.exists():
-                missing_dirs.append("depth")
-            if not mask_dir.exists():
-                missing_dirs.append(self.sam_folder)
+                raise FileNotFoundError(f"RGB directory missing: {rgb_dir}")
                 
-            if missing_dirs:
-                scenes_with_missing_dirs.append(f"{scene_id} (missing: {', '.join(missing_dirs)})")
-                continue
-                
-            # Find common frame names
-            rgb_frames = {f.stem for f in rgb_dir.glob("*.jpg")}
+            rgb_frames = [f.stem for f in rgb_dir.glob("*.jpg")] + [f.stem for f in rgb_dir.glob("*.png")]
             if not rgb_frames:
-                rgb_frames = {f.stem for f in rgb_dir.glob("*.png")}
-            depth_frames = {f.stem for f in depth_dir.glob("*.png")}
-            mask_frames = {f.stem for f in mask_dir.glob("*.png")}
-            
-            common_frames = rgb_frames & depth_frames & mask_frames
-            
-            if not common_frames:
-                scenes_with_no_frames.append(f"{scene_id} (RGB: {len(rgb_frames)}, Depth: {len(depth_frames)}, Masks: {len(mask_frames)})")
-                continue
+                raise FileNotFoundError(f"No RGB frames found: {rgb_dir}")
                 
-            # Add all valid pairs
-            for frame_id in sorted(common_frames):
-                pairs.append(f"{scene_id} {frame_id}")
+            total_rgb_count += len(rgb_frames)
+            scene_data.append((scene_id, processed_scene_path, rgb_frames))
         
-        # Report any issues
-        if missing_scenes:
-            raise FileNotFoundError(f"Missing {len(missing_scenes)} scenes for split '{self.mode}': {missing_scenes[:10]}{'...' if len(missing_scenes) > 10 else ''}")
-            
-        if scenes_with_missing_dirs:
-            raise FileNotFoundError(f"Scenes with missing directories: {scenes_with_missing_dirs[:5]}{'...' if len(scenes_with_missing_dirs) > 5 else ''}")
-            
-        if scenes_with_no_frames:
-            raise FileNotFoundError(f"Scenes with no matching frames: {scenes_with_no_frames[:5]}{'...' if len(scenes_with_no_frames) > 5 else ''}")
+        if total_rgb_count == 0:
+            raise ValueError(f"No RGB frames found for split '{self.mode}'")
         
-        if not pairs:
-            raise ValueError(f"No valid scene/frame pairs found for split '{self.mode}'. Expected {scene_count} scenes.")
+        if self.max_frames and self.max_frames < total_rgb_count:
+            skip_rate = total_rgb_count / self.max_frames
+            print(f"Sampling: {total_rgb_count} -> {self.max_frames} frames (n={skip_rate:.3f})")
+            
+            for scene_id, processed_path, rgb_frames in scene_data:
+                frame_data = [(f, self._extract_frame_number(f)) for f in rgb_frames]
+                frame_data.sort(key=lambda x: x[1])
                 
-        print(f"Found {len(pairs)} valid scene/frame pairs for split '{self.mode}' from {scene_count} scenes")
+                selected = self._sample_with_running_avg([f[0] for f in frame_data], skip_rate)
+                self._validate_frames(scene_id, processed_path, selected)
+                pairs.extend([f"{scene_id} {f}" for f in selected])
+        else:
+            for scene_id, processed_path, rgb_frames in scene_data:
+                depth_dir = processed_path / "iphone" / "depth"
+                mask_dir = processed_path / self.sam_folder
+                
+                if not depth_dir.exists():
+                    raise FileNotFoundError(f"Depth directory missing: {depth_dir}")
+                if not mask_dir.exists():
+                    raise FileNotFoundError(f"Mask directory missing: {mask_dir}")
+                
+                depth_frames = {f.stem for f in depth_dir.glob("*.png")}
+                mask_frames = {f.stem for f in mask_dir.glob("*.png")}
+                valid_frames = set(rgb_frames) & depth_frames & mask_frames
+                
+                if not valid_frames:
+                    raise FileNotFoundError(f"No matching frames for scene {scene_id}")
+                
+                # Sort by numeric frame number, not alphabetically
+                valid_frame_data = [(f, self._extract_frame_number(f)) for f in valid_frames]
+                valid_frame_data.sort(key=lambda x: x[1])
+                pairs.extend([f"{scene_id} {f[0]}" for f in valid_frame_data])
+        
+        print(f"Found {len(pairs)} valid scene/frame pairs")
         return pairs
+
+    def _extract_frame_number(self, frame_id):
+        match = re.search(r'frame_(\d+)', frame_id)
+        return int(match.group(1)) if match else 0
+
+    def _sample_with_running_avg(self, frames, skip_rate):
+        selected = []
+        cumulative_skip = 0.0
+        i = 0
+        
+        while i < len(frames):
+            selected.append(frames[i])
+            
+            if len(selected) > 1:
+                effective_skip = cumulative_skip / (len(selected) - 1)
+                next_skip = int(skip_rate) if effective_skip > skip_rate else int(skip_rate) + 1
+            else:
+                next_skip = int(skip_rate) + 1
+            
+            i += next_skip
+            cumulative_skip += next_skip
+        
+        return selected
+
+    def _validate_frames(self, scene_id, scene_path, frame_ids):
+        depth_dir = scene_path / "iphone" / "depth"
+        mask_dir = scene_path / self.sam_folder
+        
+        if not depth_dir.exists():
+            raise FileNotFoundError(f"Depth directory missing: {depth_dir}")
+        if not mask_dir.exists():
+            raise FileNotFoundError(f"Mask directory missing: {mask_dir}")
+        
+        for frame_id in frame_ids:
+            if not (depth_dir / f"{frame_id}.png").exists():
+                raise FileNotFoundError(f"Missing depth: {scene_id}/{frame_id}")
+            if not (mask_dir / f"{frame_id}.png").exists():
+                raise FileNotFoundError(f"Missing mask: {scene_id}/{frame_id}")
 
     def _load_scene_metadata(self):
         """Load intrinsics and poses for all scenes"""
@@ -408,7 +438,7 @@ class ScannetppStage1Dataset(Dataset):
             if color_image is None:
                 raise ValueError(f"Failed to load RGB image (cv2.imread returned None): {color_path}")
             color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-            color_image = cv2.resize(color_image, (640, 480))
+            color_image = cv2.resize(color_image, pointcloud_dims)
         except Exception as e:
             raise IOError(f"Error loading RGB image {color_path}: {e}")
 
@@ -429,7 +459,7 @@ class ScannetppStage1Dataset(Dataset):
             if depth_image.size == 0:
                 raise ValueError(f"Depth image is empty: {depth_path}")
             
-            depth_image = cv2.resize(depth_image, (640, 480), interpolation=cv2.INTER_NEAREST)
+            depth_image = cv2.resize(depth_image, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
                 
         except Exception as e:
             raise IOError(f"Error loading depth image {depth_path}: {e}")
@@ -469,7 +499,7 @@ class ScannetppStage1Dataset(Dataset):
             if sam_groups.size == 0:
                 raise ValueError(f"SAM mask is empty: {sam_path}")
             
-            sam_groups = cv2.resize(sam_groups, (640, 480), interpolation=cv2.INTER_NEAREST)
+            sam_groups = cv2.resize(sam_groups, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
                 
         except Exception as e:
             raise IOError(f"Error loading SAM mask {sam_path}: {e}")

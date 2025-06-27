@@ -38,7 +38,7 @@ def main():
     output_dir.mkdir(exist_ok=True)
     
     for mode, suffix in [("validation", "raw"), ("train", "augmented")]:
-        dataset = ScannetppStage1Dataset(mode=mode, scenes_to_exclude="dfac5b38df,00dd871005,c4c04e6d6c")
+        dataset = ScannetppStage1Dataset(mode=mode, max_frames=10, scenes_to_exclude="dfac5b38df,00dd871005,c4c04e6d6c")
         for i in range(args.num_samples):
             sample = dataset[i]
             save_sample(sample, output_dir, suffix)

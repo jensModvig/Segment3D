@@ -15,9 +15,9 @@ general:
   export: false
   use_dbscan: false
   ignore_class_threshold: 100
-  project_name: scannet
+  project_name: scannetpp
   workspace: thesis
-  experiment_name: train_stage1_20250622_221823
+  experiment_name: train_stage1_scannetpp_20250627_174741
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -66,7 +66,7 @@ data:
   generate_masks_path: data/processed/scannet_3d_masks
   use_masks_th: 150
   use_masks_score: 0.6
-  sam_folder: sam
+  sam_folder: gt_mask
   train_dataloader:
     _target_: torch.utils.data.DataLoader
     shuffle: true
@@ -86,13 +86,14 @@ data:
     num_workers: ${data.num_workers}
     batch_size: ${data.test_batch_size}
   train_dataset:
-    _target_: datasets.scannet_stage1.SemanticSegmentationDataset
-    dataset_name: scannet
-    data_dir: data/processed
+    _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
+    dataset_name: scannetpp
+    data_dir: bigdata/processed/scannetpp/data
     image_augmentations_path: conf/augmentation/albumentations_aug.yaml
     volume_augmentations_path: conf/augmentation/volumentations_aug.yaml
-    label_db_filepath: data/processed/scannet200/label_database.yaml
-    color_mean_std: data/processed/scannet200/color_mean_std.yaml
+    label_db_filepath: data/processed/scannetpp/label_database.yaml
+    color_mean_std: data/processed/scannetpp/color_mean_std.yaml
+    sam_folder: gt_mask
     data_percent: 1.0
     mode: ${data.train_mode}
     ignore_label: ${data.ignore_label}
@@ -100,7 +101,6 @@ data:
     add_raw_coordinates: ${data.add_raw_coordinates}
     add_colors: ${data.add_colors}
     add_normals: ${data.add_normals}
-    sam_folder: ${data.sam_folder}
     add_instance: ${data.add_instance}
     instance_oversampling: 0.0
     place_around_existing: false
@@ -117,14 +117,16 @@ data:
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
+    scenes_to_exclude: dfac5b38df,00dd871005,c4c04e6d6c
   validation_dataset:
-    _target_: datasets.scannet_stage1.SemanticSegmentationDataset
-    dataset_name: scannet
-    data_dir: data/processed
+    _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
+    dataset_name: scannetpp
+    data_dir: bigdata/processed/scannetpp/data
     image_augmentations_path: null
     volume_augmentations_path: null
-    label_db_filepath: data/processed/scannet200/label_database.yaml
-    color_mean_std: data/processed/scannet200/color_mean_std.yaml
+    label_db_filepath: data/processed/scannetpp/label_database.yaml
+    color_mean_std: data/processed/scannetpp/color_mean_std.yaml
+    sam_folder: gt_mask
     data_percent: 1.0
     mode: ${data.validation_mode}
     ignore_label: ${data.ignore_label}
@@ -140,13 +142,14 @@ data:
     filter_out_classes: []
     label_offset: 0
   test_dataset:
-    _target_: datasets.scannet_stage1.SemanticSegmentationDataset
-    dataset_name: scannet
-    data_dir: data/processed
+    _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
+    dataset_name: scannetpp
+    data_dir: bigdata/processed/scannetpp/data
     image_augmentations_path: null
     volume_augmentations_path: null
-    label_db_filepath: data/processed/scannet200/label_database.yaml
-    color_mean_std: data/processed/scannet200/color_mean_std.yaml
+    label_db_filepath: data/processed/scannetpp/label_database.yaml
+    color_mean_std: data/processed/scannetpp/color_mean_std.yaml
+    sam_folder: gt_mask
     data_percent: 1.0
     mode: ${data.test_mode}
     ignore_label: ${data.ignore_label}
@@ -307,3 +310,4 @@ loss:
   oversample_ratio: 3.0
   importance_sample_ratio: 0.75
   class_weights: -1
+max_frames: 76000
