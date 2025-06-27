@@ -306,12 +306,7 @@ class ScannetppStage1Dataset(Dataset):
                     if not isinstance(frame_data, dict):
                         continue
                     
-                    # Extract frame ID from frame_key (e.g., "frame_000000" -> "000000")
-                    if frame_key.startswith("frame_"):
-                        frame_id = frame_key.replace("frame_", "")
-                    else:
-                        # Handle other possible frame key formats
-                        frame_id = frame_key
+                    frame_id = frame_key
                     
                     # Extract intrinsic matrix for this frame
                     if "intrinsic" in frame_data:
@@ -433,6 +428,8 @@ class ScannetppStage1Dataset(Dataset):
             
             if depth_image.size == 0:
                 raise ValueError(f"Depth image is empty: {depth_path}")
+            
+            depth_image = cv2.resize(depth_image, (640, 480), interpolation=cv2.INTER_NEAREST)
                 
         except Exception as e:
             raise IOError(f"Error loading depth image {depth_path}: {e}")
@@ -443,36 +440,21 @@ class ScannetppStage1Dataset(Dataset):
             
         scene_meta = self.scene_metadata[scene_id]
         
-        # Find pose for this frame
         if frame_id not in scene_meta["frame_to_pose"]:
-            # Try different frame ID formats
-            alt_frame_ids = [
-                frame_id.lstrip('0') if frame_id != '0' else '0',
-                str(int(frame_id)),
-                frame_id.zfill(6),
-                frame_id.zfill(8)
-            ]
-            
-            found_pose = None
-            for alt_id in alt_frame_ids:
-                if alt_id in scene_meta["frame_to_pose"]:
-                    found_pose = scene_meta["frame_to_pose"][alt_id]
-                    break
-                    
-            if found_pose is None:
-                available_frames = list(scene_meta["frame_to_pose"].keys())[:10]
-                raise FileNotFoundError(f"No pose found for scene {scene_id}, frame {frame_id}. Tried formats: {alt_frame_ids}. Available frames (first 10): {available_frames}")
-            else:
-                pose = found_pose
-        else:
-            pose = scene_meta["frame_to_pose"][frame_id]
+            available_frames = list(scene_meta["frame_to_pose"].keys())[:10]
+            raise FileNotFoundError(f"No pose found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
+        
+        pose = scene_meta["frame_to_pose"][frame_id]
 
         # Validate pose
         if pose.shape != (4, 4):
             raise ValueError(f"Invalid pose shape {pose.shape} for scene {scene_id}, frame {frame_id}. Expected (4, 4)")
 
-        # Use scene-specific intrinsics
-        depth_intrinsic = scene_meta["intrinsics"]
+        if frame_id not in scene_meta["frame_to_intrinsic"]:
+            available_frames = list(scene_meta["frame_to_intrinsic"].keys())[:10]
+            raise FileNotFoundError(f"No intrinsic found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
+        
+        depth_intrinsic = scene_meta["frame_to_intrinsic"][frame_id]
 
         # Load SAM mask
         sam_path = processed_scene_path / self.sam_folder / f"{frame_id}.png"
@@ -486,6 +468,8 @@ class ScannetppStage1Dataset(Dataset):
                 
             if sam_groups.size == 0:
                 raise ValueError(f"SAM mask is empty: {sam_path}")
+            
+            sam_groups = cv2.resize(sam_groups, (640, 480), interpolation=cv2.INTER_NEAREST)
                 
         except Exception as e:
             raise IOError(f"Error loading SAM mask {sam_path}: {e}")
