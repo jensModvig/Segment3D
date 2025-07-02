@@ -193,6 +193,14 @@ class ScannetppStage1Dataset(Dataset):
 
         self.cache_data = cache_data
 
+    def get_raw_sample(self, idx):
+        original_mode = self.mode
+        self.mode = "validation"
+        try:
+            return self.__getitem__(idx)
+        finally:
+            self.mode = original_mode
+
     def _discover_scene_frame_pairs(self):
         pairs = []
         total_rgb_count = 0

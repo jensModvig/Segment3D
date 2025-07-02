@@ -78,6 +78,7 @@ class SemanticSegmentationDataset(Dataset):
         add_clip=False,
         is_elastic_distortion=True,
         color_drop=0.0,
+        max_frames: Optional[int] = None,
     ):
         assert task in [
             "instance_segmentation",
@@ -88,6 +89,7 @@ class SemanticSegmentationDataset(Dataset):
         self.dataset_name = dataset_name
         self.is_elastic_distortion = is_elastic_distortion
         self.color_drop = color_drop
+        self.max_frames = max_frames
 
         if self.dataset_name == "scannet":
             self.color_map = {0: [0, 255, 0]}
@@ -157,6 +159,10 @@ class SemanticSegmentationDataset(Dataset):
             self._data = sample(
                 self._data, int(len(self._data) * data_percent)
             )
+        
+        # Apply max_frames limit if specified
+        if self.max_frames and len(self._data) > self.max_frames:
+            self._data = self._data[:self.max_frames]
         
         self.depth_intrinsic = np.loadtxt('data/processed/scannet_info/intrinsics.txt')
 
@@ -252,6 +258,15 @@ class SemanticSegmentationDataset(Dataset):
                 self._data = new_data
                 # new_data.append(np.load(self.data[i]["filepath"].replace("../../", "")))
             # self._data = new_data
+
+    def get_raw_sample(self, idx):
+        """Get raw sample without augmentations for debugging."""
+        original_mode = self.mode
+        self.mode = "validation"  # Disable augmentations
+        try:
+            return self.__getitem__(idx)
+        finally:
+            self.mode = original_mode
 
     def splitPointCloud(self, cloud, size=50.0, stride=50, inner_core=-1):
         if inner_core == -1:
@@ -353,7 +368,8 @@ class SemanticSegmentationDataset(Dataset):
 
         depth_intrinsic = self.depth_intrinsic
 
-        with open(os.path.join(self.data_dir, 'scannet', scene_id, self.sam_folder, f'{image_id}.png'), 'rb') as image_file:
+        sam_path = os.path.join(self.data_dir, 'scannet', scene_id, self.sam_folder, f'{image_id}.png')
+        with open(sam_path, 'rb') as image_file:
             img = Image.open(image_file)
             sam_groups = np.array(img, dtype=np.int16)
 
