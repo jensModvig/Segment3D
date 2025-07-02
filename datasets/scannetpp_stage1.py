@@ -492,7 +492,15 @@ class ScannetppStage1Dataset(Dataset):
             available_frames = list(scene_meta["frame_to_intrinsic"].keys())[:10]
             raise FileNotFoundError(f"No intrinsic found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
         
-        depth_intrinsic = scene_meta["frame_to_intrinsic"][frame_id]
+        depth_intrinsic = scene_meta["frame_to_intrinsic"][frame_id].copy()
+        
+        # Scale intrinsics from original resolution (1920x1440) to pointcloud_dims (256x192)
+        scale_x = pointcloud_dims[0] / 1920.0
+        scale_y = pointcloud_dims[1] / 1440.0
+        depth_intrinsic[0, 0] *= scale_x
+        depth_intrinsic[1, 1] *= scale_y
+        depth_intrinsic[0, 2] *= scale_x
+        depth_intrinsic[1, 2] *= scale_y
 
         # Load SAM mask
         sam_path = processed_scene_path / self.sam_folder / f"{frame_id}.png"
