@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: scannetpp
   workspace: thesis
-  experiment_name: train_stage1_scannetpp_20250703_151506
+  experiment_name: train_stage1_scannetpp_20250706_150939
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -67,6 +67,8 @@ data:
   use_masks_th: 150
   use_masks_score: 0.6
   sam_folder: gt_mask
+  max_frames: null
+  scenes_to_exclude: dfac5b38df,00dd871005,c4c04e6d6c
   train_dataloader:
     _target_: torch.utils.data.DataLoader
     shuffle: true
@@ -117,7 +119,8 @@ data:
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
-    scenes_to_exclude: dfac5b38df,00dd871005,c4c04e6d6c
+    scenes_to_exclude: ${data.scenes_to_exclude}
+    max_frames: 475000
   validation_dataset:
     _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
     dataset_name: scannetpp
@@ -141,6 +144,8 @@ data:
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
+    scenes_to_exclude: ${data.scenes_to_exclude}
+    max_frames: ${data.max_frames}
   test_dataset:
     _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
     dataset_name: scannetpp
@@ -164,6 +169,8 @@ data:
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
+    scenes_to_exclude: ${data.scenes_to_exclude}
+    max_frames: ${data.max_frames}
   train_collation:
     _target_: datasets.utils.VoxelizeCollate
     ignore_label: ${data.ignore_label}
@@ -310,4 +317,3 @@ loss:
   oversample_ratio: 3.0
   importance_sample_ratio: 0.75
   class_weights: -1
-max_frames: 76000

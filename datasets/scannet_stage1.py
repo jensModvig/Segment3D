@@ -38,6 +38,7 @@ class SemanticSegmentationDataset(Dataset):
             str
         ] = "configs/scannet_preprocessing/label_database.yaml",
         sam_folder: Optional[str] = "sam",
+        scenes_to_exclude: str = "",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
             (0.47793125906962, 0.4303257521323044, 0.3749598901421883),
@@ -113,6 +114,12 @@ class SemanticSegmentationDataset(Dataset):
         self.sam_folder = sam_folder
         print('SAM folder is', self.sam_folder)
 
+        # Handle scenes to exclude
+        self.excluded_scenes = set()
+        if scenes_to_exclude:
+            self.excluded_scenes.update(scene.strip() for scene in scenes_to_exclude.split(',') if scene.strip())
+            print(f'Excluding scenes: {self.excluded_scenes}')
+
         self.crop_min_size = crop_min_size
         self.crop_length = crop_length
 
@@ -155,6 +162,12 @@ class SemanticSegmentationDataset(Dataset):
         with open(data_path, "r") as scene_file:
             self._data = scene_file.read().splitlines()
 
+        # Filter out excluded scenes
+        if self.excluded_scenes:
+            original_count = len(self._data)
+            self._data = [item for item in self._data if not any(excluded_scene in item for excluded_scene in self.excluded_scenes)]
+            print(f'Filtered dataset: {original_count} -> {len(self._data)} items after excluding scenes')
+
         if data_percent < 1.0:
             self._data = sample(
                 self._data, int(len(self._data) * data_percent)
@@ -163,6 +176,7 @@ class SemanticSegmentationDataset(Dataset):
         # Apply max_frames limit if specified
         if self.max_frames and len(self._data) > self.max_frames:
             self._data = self._data[:self.max_frames]
+            print(f'Limited dataset to {self.max_frames} frames')
         
         self.depth_intrinsic = np.loadtxt('data/processed/scannet_info/intrinsics.txt')
 

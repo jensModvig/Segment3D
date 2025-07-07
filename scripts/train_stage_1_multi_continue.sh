@@ -17,12 +17,12 @@ else
 fi
 
 CUDA_VISIBLE_DEVICES=0,1 python main_instance_segmentation_stage1.py \
-    general.experiment_name="train_stage1_${DATASET}_${CURRENT_TIME}" \
-    general.project_name="${DATASET}" \
+    general.experiment_name="train_stage1_scannetpp_20250705_085130" \
+    general.project_name="scannetpp" \
     data/datasets=${DATASET_CONFIG} \
     data.scenes_to_exclude="${SCENES_TO_EXCLUDE}" \
-    data.train_dataset.max_frames=475000 \
-    optimizer.lr=0.0002 \
+    data.train_dataset.max_frames=76000 \
+    optimizer.lr=0.00015 \
     data.batch_size=8 \
     data.num_workers=4 \
     data.sam_folder="${SAM_FOLDER}" \

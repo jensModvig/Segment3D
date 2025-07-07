@@ -15,12 +15,12 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.train_on_segments=true \
     model.num_queries=${CURR_QUERY} \
     general.topk_per_image=${CURR_TOPK} \
-    general.use_dbscan=true \
+    general.use_dbscan=false \
     general.dbscan_eps=${CURR_DBSCAN} \
     general.dbscan_min_points=${CURR_DBSCAN_MIN_POINTS} \
     general.gpus=1 \
     general.save_visualizations=false \
-    general.checkpoint="checkpoints/ctoGTSAM_e20_train_stage1_20250623_111111.ckpt" \
+    general.checkpoint="checkpoints/epoch17_train_stage1_scannetpp_20250704_132459.ckpt" \
     data.remove_small_group=15
 
 

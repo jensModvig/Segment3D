@@ -1,8 +1,8 @@
-- general.experiment_name=train_stage1_scannetpp_20250703_151506
+- general.experiment_name=train_stage1_scannetpp_20250706_150939
 - general.project_name=scannetpp
 - data/datasets=scannetpp_stage1
-- +data.train_dataset.scenes_to_exclude='dfac5b38df,00dd871005,c4c04e6d6c'
-- +max_frames=76000
+- data.scenes_to_exclude='dfac5b38df,00dd871005,c4c04e6d6c'
+- data.train_dataset.max_frames=475000
 - optimizer.lr=0.0002
 - data.batch_size=8
 - data.num_workers=4

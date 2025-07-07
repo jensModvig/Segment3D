@@ -16,7 +16,6 @@ train_dataset:
   add_normals: ${data.add_normals}
   sam_folder: ${data.sam_folder}
   add_instance: ${data.add_instance}
-  # different augs experiments
   instance_oversampling: 0.0
   place_around_existing: false
   point_per_cut: 0
@@ -32,6 +31,8 @@ train_dataset:
   crop_length: ${data.crop_length}
   filter_out_classes: []
   label_offset: 0
+  scenes_to_exclude: ${data.scenes_to_exclude}
+  max_frames: ${data.max_frames}
 
 validation_dataset:
   _target_: datasets.scannet_stage1.SemanticSegmentationDataset
@@ -55,6 +56,8 @@ validation_dataset:
   crop_length: ${data.crop_length}
   filter_out_classes: []
   label_offset: 0
+  scenes_to_exclude: ${data.scenes_to_exclude}
+  max_frames: ${data.max_frames}
 
 test_dataset:
   _target_: datasets.scannet_stage1.SemanticSegmentationDataset
@@ -78,3 +81,5 @@ test_dataset:
   crop_length: ${data.crop_length}
   filter_out_classes: []
   label_offset: 0
+  scenes_to_exclude: ${data.scenes_to_exclude}
+  max_frames: ${data.max_frames}

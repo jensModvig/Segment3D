@@ -7,7 +7,7 @@ train_dataset:
   volume_augmentations_path: conf/augmentation/volumentations_aug.yaml
   label_db_filepath: data/processed/scannetpp/label_database.yaml
   color_mean_std: data/processed/scannetpp/color_mean_std.yaml
-  sam_folder: "gt_mask"  # SAM masks folder name
+  sam_folder: "gt_mask"
   data_percent: 1.0
   mode: ${data.train_mode}
   ignore_label: ${data.ignore_label}
@@ -16,7 +16,6 @@ train_dataset:
   add_colors: ${data.add_colors}
   add_normals: ${data.add_normals}
   add_instance: ${data.add_instance}
-  # augmentation parameters
   instance_oversampling: 0.0
   place_around_existing: false
   point_per_cut: 0
@@ -32,6 +31,8 @@ train_dataset:
   crop_length: ${data.crop_length}
   filter_out_classes: []
   label_offset: 0
+  scenes_to_exclude: ${data.scenes_to_exclude}
+  max_frames: ${data.max_frames}
 
 validation_dataset:
   _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
@@ -56,6 +57,8 @@ validation_dataset:
   crop_length: ${data.crop_length}
   filter_out_classes: []
   label_offset: 0
+  scenes_to_exclude: ${data.scenes_to_exclude}
+  max_frames: ${data.max_frames}
 
 test_dataset:
   _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
@@ -80,3 +83,5 @@ test_dataset:
   crop_length: ${data.crop_length}
   filter_out_classes: []
   label_offset: 0
+  scenes_to_exclude: ${data.scenes_to_exclude}
+  max_frames: ${data.max_frames}
