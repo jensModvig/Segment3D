@@ -1,4 +1,4 @@
-- general.experiment_name=train_stage1_scannetpp_20250708_134531
+- general.experiment_name=train_stage1_scannetpp_20250708_154015
 - general.project_name=scannetpp
 - data/datasets=scannetpp_stage1
 - data.scenes_to_exclude='dfac5b38df,00dd871005,c4c04e6d6c'

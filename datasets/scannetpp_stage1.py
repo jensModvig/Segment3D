@@ -227,14 +227,18 @@ class ScannetppStage1Dataset(Dataset):
             raise ValueError(f"No RGB frames found for split '{self.mode}'")
         
         if self.max_frames and self.max_frames < total_rgb_count:
-            skip_rate = total_rgb_count / self.max_frames
-            print(f"Sampling: {total_rgb_count} -> {self.max_frames} frames (n={skip_rate:.3f})")
+            sample_rate = self.max_frames / total_rgb_count
+            print(f"Sampling: {total_rgb_count} -> {self.max_frames} frames (rate={sample_rate:.3f})")
             
             for scene_id, processed_path, rgb_frames in scene_data:
+                n_samples = max(1, int(len(rgb_frames) * sample_rate))
+                
                 frame_data = [(f, self._extract_frame_number(f)) for f in rgb_frames]
                 frame_data.sort(key=lambda x: x[1])
                 
-                selected = self._sample_with_running_avg([f[0] for f in frame_data], skip_rate)
+                indices = np.linspace(0, len(frame_data) - 1, n_samples, dtype=int)
+                selected = [frame_data[i][0] for i in indices]
+                
                 self._validate_frames(scene_id, processed_path, selected)
                 pairs.extend([f"{scene_id} {f}" for f in selected])
         else:
@@ -254,7 +258,6 @@ class ScannetppStage1Dataset(Dataset):
                 if not valid_frames:
                     raise FileNotFoundError(f"No matching frames for scene {scene_id}")
                 
-                # Sort by numeric frame number, not alphabetically
                 valid_frame_data = [(f, self._extract_frame_number(f)) for f in valid_frames]
                 valid_frame_data.sort(key=lambda x: x[1])
                 pairs.extend([f"{scene_id} {f[0]}" for f in valid_frame_data])
@@ -265,26 +268,6 @@ class ScannetppStage1Dataset(Dataset):
     def _extract_frame_number(self, frame_id):
         match = re.search(r'frame_(\d+)', frame_id)
         return int(match.group(1)) if match else 0
-
-    def _sample_with_running_avg(self, frames, skip_rate):
-        selected = []
-        cumulative_skip = 0.0
-        i = 0
-        
-        while i < len(frames) and len(selected) < len(frames):
-            selected.append(frames[i])
-            
-            if len(selected) > 1:
-                effective_skip = cumulative_skip / (len(selected) - 1)
-                next_skip = int(skip_rate) if effective_skip > skip_rate else int(skip_rate) + 1
-            else:
-                next_skip = int(skip_rate) + 1
-            
-            next_skip = max(1, next_skip)
-            i += next_skip
-            cumulative_skip += next_skip
-        
-        return selected
 
     def _validate_frames(self, scene_id, scene_path, frame_ids):
         depth_dir = scene_path / "iphone" / "depth"
