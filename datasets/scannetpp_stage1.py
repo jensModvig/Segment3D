@@ -34,8 +34,6 @@ pointcloud_dims = (256, 192)
 
 class ScannetppStage1Dataset(Dataset):
     """ScanNet++ Stage1 Dataset for training on 2D SAM masks."""
-    
-    _excluded_scenes = set()
 
     def __init__(
         self,
@@ -88,6 +86,10 @@ class ScannetppStage1Dataset(Dataset):
         color_drop=0.0,
         max_frames: Optional[int] = None,
     ):
+        self.excluded_scenes = set()
+        if scenes_to_exclude:
+            self.excluded_scenes.update(scene.strip() for scene in scenes_to_exclude.split(',') if scene.strip())
+        
         assert task in [
             "instance_segmentation",
             "semantic_segmentation",
@@ -119,11 +121,6 @@ class ScannetppStage1Dataset(Dataset):
         self.is_tta = is_tta
         self.on_crops = on_crops
         self.sam_folder = sam_folder
-        print('SAM folder is', self.sam_folder)
-
-        if scenes_to_exclude:
-            ScannetppStage1Dataset._excluded_scenes.update(scene.strip() for scene in scenes_to_exclude.split(',') if scene.strip())
-        self.excluded_scenes = ScannetppStage1Dataset._excluded_scenes
 
         self.crop_min_size = crop_min_size
         self.crop_length = crop_length
@@ -274,7 +271,7 @@ class ScannetppStage1Dataset(Dataset):
         cumulative_skip = 0.0
         i = 0
         
-        while i < len(frames):
+        while i < len(frames) and len(selected) < len(frames):
             selected.append(frames[i])
             
             if len(selected) > 1:
@@ -283,6 +280,7 @@ class ScannetppStage1Dataset(Dataset):
             else:
                 next_skip = int(skip_rate) + 1
             
+            next_skip = max(1, next_skip)
             i += next_skip
             cumulative_skip += next_skip
         
@@ -442,10 +440,8 @@ class ScannetppStage1Dataset(Dataset):
             raise FileNotFoundError(f"RGB frame not found for scene {scene_id}, frame {frame_id}. Checked: {processed_scene_path / 'iphone' / 'rgb' / frame_id}.jpg and .png")
         
         try:
-            color_image = cv2.imread(str(color_path))
-            if color_image is None:
-                raise ValueError(f"Failed to load RGB image (cv2.imread returned None): {color_path}")
-            color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+            with Image.open(color_path) as img:
+                color_image = np.array(img.convert('RGB'))
             color_image = cv2.resize(color_image, pointcloud_dims)
         except Exception as e:
             raise IOError(f"Error loading RGB image {color_path}: {e}")
@@ -456,19 +452,13 @@ class ScannetppStage1Dataset(Dataset):
             raise FileNotFoundError(f"Depth image not found for scene {scene_id}, frame {frame_id}: {depth_path}")
         
         try:
-            depth_image = cv2.imread(str(depth_path), -1)
-            if depth_image is None:
-                raise ValueError(f"Failed to load depth image (cv2.imread returned None): {depth_path}")
-            
-            # Validate depth image
-            if depth_image.dtype != np.uint16:
-                print(f"Warning: Depth image has unexpected dtype {depth_image.dtype}, expected uint16: {depth_path}")
+            with Image.open(depth_path) as img:
+                depth_image = np.array(img, dtype=np.uint16)
             
             if depth_image.size == 0:
                 raise ValueError(f"Depth image is empty: {depth_path}")
             
             depth_image = cv2.resize(depth_image, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
-                
         except Exception as e:
             raise IOError(f"Error loading depth image {depth_path}: {e}")
 

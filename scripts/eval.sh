@@ -20,7 +20,7 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation.py \
     general.dbscan_min_points=${CURR_DBSCAN_MIN_POINTS} \
     general.gpus=1 \
     general.save_visualizations=false \
-    general.checkpoint="checkpoints/epoch17_train_stage1_scannetpp_20250704_132459.ckpt" \
+    general.checkpoint="checkpoints/epoch17_train_stage1_scannetpp_20250705_085130.ckpt" \
     data.remove_small_group=15
 
 
