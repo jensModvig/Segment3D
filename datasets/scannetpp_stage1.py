@@ -189,6 +189,39 @@ class ScannetppStage1Dataset(Dataset):
             self.normalize_color = A.Normalize(mean=color_mean, std=color_std)
 
         self.cache_data = cache_data
+        
+    @staticmethod
+    def load_specific_frame(scene_id, frame_id):
+        import json
+        import numpy as np
+        from thes.paths import scannetpp_raw_dir
+        
+        dataset = ScannetppStage1Dataset(
+            mode="validation",
+            point_per_cut=0,
+            cropping=False,
+            is_tta=False,
+            scenes_to_exclude="dfac5b38df,00dd871005,c4c04e6d6c"
+        )
+        dataset._data = [f"{scene_id} {frame_id}"]
+        dataset.mode = "validation"
+        
+        pose_file = scannetpp_raw_dir / "data" / scene_id / "iphone" / "pose_intrinsic_imu.json"
+        with open(pose_file, 'r') as f:
+            data = json.load(f)
+        
+        frame_data = data[frame_id]
+        pose = np.array(frame_data.get("aligned_pose", frame_data["pose"]))
+        if pose.shape == (16,):
+            pose = pose.reshape(4, 4)
+        
+        dataset.scene_metadata[scene_id] = {
+            "frame_to_pose": {frame_id: pose},
+            "frame_to_intrinsic": {frame_id: np.array(frame_data["intrinsic"])}
+        }
+        
+        sample = dataset.get_raw_sample(0)
+        return sample[0], sample[4], sample[2]
 
     def get_raw_sample(self, idx):
         original_mode = self.mode

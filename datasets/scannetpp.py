@@ -268,6 +268,60 @@ class SemanticSegmentationDataset(Dataset):
                 self._data = new_data
                 # new_data.append(np.load(self.data[i]["filepath"].replace("../../", "")))
             # self._data = new_data
+    
+    def get_raw_sample(self, idx):
+        original_mode = self.mode
+        self.mode = "validation"
+        try:
+            return self.__getitem__(idx)
+        finally:
+            self.mode = original_mode
+
+    @staticmethod
+    def load_specific_scene(scene_id):
+        """Load specific scene without augmentations"""
+        data_dir = Path("/work3/s173955/bigdata/processed/scannetpp_seg3d_test")
+        found_split = None
+        scene_data = None
+        
+        for split in ["train", "val", "test"]:
+            database_path = data_dir / f"{split}_database.yaml"
+            print(database_path)
+            if not database_path.exists():
+                continue
+                
+            with open(database_path) as f:
+                database = yaml.load(f, Loader=yaml.SafeLoader)
+            
+            for entry in database:
+                if entry.get("scene") == scene_id:
+                    found_split = split
+                    scene_data = entry
+                    break
+            if found_split:
+                break
+        
+        if not found_split:
+            raise FileNotFoundError(f"Scene {scene_id} not found in any split")
+        
+        # Create temporary dataset instance
+        dataset = SemanticSegmentationDataset(
+            mode="validation",
+            data_dir=str(data_dir),
+            label_db_filepath="data/processed/scannetpp/label_database.yaml",
+            point_per_cut=0,
+            cropping=False,
+            is_tta=False,
+            dataset_name='scannetpp'
+        )
+        dataset._data = [scene_data]
+        dataset.mode = "validation"
+        
+        try:
+            sample = dataset.get_raw_sample(0)
+            return sample[0], sample[4], sample[2]  # coordinates, raw_color, labels
+        except Exception as e:
+            raise FileNotFoundError(f"Failed to load scene {scene_id}: {e}")
 
     def splitPointCloud(self, cloud, size=50.0, stride=50, inner_core=-1):
         if inner_core == -1:
