@@ -123,6 +123,10 @@ class InstanceSegmentation(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         data, target, file_names = batch
+        
+        # ADD DEBUG CODE HERE
+        total_targets = sum(len(t.get("labels", [])) for t in target)
+        print(f"Batch {batch_idx}: {total_targets} targets entering loss calculation")
 
         if data.features.shape[0] > self.config.general.max_batch_size:
             print("data exceeds threshold")

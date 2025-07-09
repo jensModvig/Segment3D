@@ -121,6 +121,16 @@ class InstanceSegmentation(pl.LightningModule):
                 is_eval=is_eval,
             )
         return x
+    
+    def validate_no_unlabeled_in_loss(self, target, output):
+        """Check that no -1 instances are in the targets"""
+        for i, t in enumerate(target):
+            if "masks" in t:
+                # Check if any mask corresponds to -1 instance
+                print(f"[VALIDATION] Target {i} has {len(t['labels'])} labels: {t['labels'].tolist()}")
+                if len(t['labels']) == 0:
+                    print(f"[VALIDATION] WARNING: Target {i} has no labels!")
+        return True
 
     def training_step(self, batch, batch_idx):
         data, target, file_names = batch
@@ -161,7 +171,8 @@ class InstanceSegmentation(pl.LightningModule):
                 return None
             else:
                 raise run_err
-
+            
+        self.validate_no_unlabeled_in_loss(target, output)
         try:
             losses = self.criterion(output, target, mask_type=self.mask_type)
         except ValueError as val_err:

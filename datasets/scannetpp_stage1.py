@@ -518,6 +518,12 @@ class ScannetppStage1Dataset(Dataset):
                 img = Image.open(image_file)
                 sam_groups = np.array(img, dtype=np.int16)
                 
+                # ADD DEBUG CODE HERE
+                sam_groups_original = np.array(img, dtype=np.uint16)
+                absent_labels = np.sum(sam_groups_original == 65535)
+                negative_ones = np.sum(sam_groups == -1)
+                print(f"Frame {scene_id}/{frame_id}: {absent_labels} absent labels → {negative_ones} negative ones")
+                
             if sam_groups.size == 0:
                 raise ValueError(f"SAM mask is empty: {sam_path}")
             
@@ -571,18 +577,28 @@ class ScannetppStage1Dataset(Dataset):
             raise ValueError(f"Error transforming points to world coordinates for scene {scene_id}, frame {frame_id}: {e}")
             
         sam_groups = self.num_to_natural(sam_groups)
+        unique_values, counts = np.unique(sam_groups, return_counts=True)
+        print(f"[DATASET] {scene_id}/{frame_id}: SAM groups after num_to_natural: {dict(zip(unique_values, counts))}")
 
         counts = Counter(sam_groups)
         for num, count in counts.items():
             if count < 100:
                 sam_groups[sam_groups == num] = -1
+        unique_values, counts = np.unique(sam_groups, return_counts=True)
+        print(f"[DATASET] {scene_id}/{frame_id}: After filtering <100: {dict(zip(unique_values, counts))}")
+
+        # After final num_to_natural
         sam_groups = self.num_to_natural(sam_groups)
+        unique_values, counts = np.unique(sam_groups, return_counts=True)
+        print(f"[DATASET] {scene_id}/{frame_id}: Final SAM groups: {dict(zip(unique_values, counts))}")
 
         coordinates = points_world[:, :3]
         color = colors
         normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
         labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
+        instance_ids_unique, instance_counts = np.unique(labels[:, 1], return_counts=True)
+        print(f"[DATASET] {scene_id}/{frame_id}: Instance IDs in labels: {dict(zip(instance_ids_unique, instance_counts))}")
 
         # Validate final point cloud
         if coordinates.shape[0] == 0:

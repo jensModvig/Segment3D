@@ -370,6 +370,12 @@ def voxelize(
                         }
                     )
             else:
+                # Before calling get_instance_masks
+                print(f"[VOXELIZE] Processing batch with {len(list_labels)} samples")
+                for i, labels in enumerate(list_labels):
+                    unique_instances = torch.unique(labels[:, 1])
+                    print(f"[VOXELIZE] Sample {i}: instances = {unique_instances.tolist()[:10]}... (showing first 10)")
+                    
                 target = get_instance_masks(
                     list_labels,
                     list_segments=input_dict["segment2label"],
@@ -438,15 +444,22 @@ def get_instance_masks(
     label_offset=0,
 ):
     target = []
-
+    
     for batch_id in range(len(list_labels)):
         label_ids = []
         masks = []
         segment_masks = []
         instance_ids = list_labels[batch_id][:, 1].unique()
-
+        
+        # ADD DEBUG HERE
+        total_instances = len(instance_ids)
+        absent_instances = torch.sum(instance_ids == -1).item()
+        valid_instances = torch.sum(instance_ids != -1).item()
+        print(f"[COLLATE] Batch {batch_id}: {total_instances} total instances, {absent_instances} with -1, {valid_instances} valid")
+        
         for instance_id in instance_ids:
             if instance_id == -1:
+                print(f"[COLLATE] Skipping instance_id -1")
                 continue
 
             # TODO is it possible that a ignore class (255) is an instance???
@@ -481,6 +494,9 @@ def get_instance_masks(
                     ][:, 2].unique()
                 ] = True
                 segment_masks.append(segment_mask)
+        
+        # ADD DEBUG CODE HERE
+        print(f"Batch {batch_id}: {total_instances} total, {absent_instances} absent (-1), {len(label_ids)} final targets")
 
         if len(label_ids) == 0:
             return list()
