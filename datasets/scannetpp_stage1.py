@@ -31,7 +31,7 @@ pointcloud_dims = (256, 192)
 
 
 def _generate_scene_counts(data_dir, split):
-    counts_file = Path(data_dir) / f"scene_counts_{split}.json"
+    counts_file = Path('/work3/s173955/bigdata/processed/scannetpp') / f"scene_counts_{split}.json"
     if counts_file.exists():
         return
     
@@ -250,7 +250,7 @@ class ScannetppStage1Dataset(Dataset):
             self.mode = original_mode
 
     def _discover_scene_frame_pairs(self):
-        counts_file = self.data_dir / f"scene_counts_{self.split}.json"
+        counts_file = Path('/work3/s173955/bigdata/processed/scannetpp') / f"scene_counts_{self.split}.json"
         with open(counts_file, 'r') as f:
             scene_counts = json.load(f)
         
