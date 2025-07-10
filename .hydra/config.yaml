@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: scannetpp
   workspace: thesis
-  experiment_name: train_stage1_scannetpp_20250710_080522
+  experiment_name: train_stage1_scannetpp_20250710_085417
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -120,7 +120,7 @@ data:
     filter_out_classes: []
     label_offset: 0
     scenes_to_exclude: ${data.scenes_to_exclude}
-    max_frames: 475000
+    max_frames: 152000
   validation_dataset:
     _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
     dataset_name: scannetpp

@@ -21,6 +21,8 @@ import cv2
 import copy
 import json
 import re
+import time
+import threading
 
 from thes.paths import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
 from torch.utils.data import Dataset
@@ -29,6 +31,49 @@ logger = logging.getLogger(__name__)
 
 pointcloud_dims = (256, 192)
 
+# === FREEZE DETECTION CODE - START ===
+class WorkerTracker:
+    def __init__(self):
+        self.worker_id = os.getpid()
+        self.log_file = Path(f"/work3/s173955/data/freeze_detection/worker_{self.worker_id}.log")
+        
+    def log(self, line_info, scene_frame=None):
+        try:
+            with open(self.log_file, 'w') as f:
+                f.write(f"{time.time():.3f}|{line_info}|{scene_frame or ''}\n")
+        except:
+            pass
+
+_tracker = WorkerTracker()
+
+def track_line(scene_frame=None):
+    import inspect
+    frame = inspect.currentframe().f_back
+    line_info = f"{frame.f_code.co_filename.split('/')[-1]}:{frame.f_lineno}"
+    _tracker.log(line_info, scene_frame)
+
+def monitor_workers():
+    def check_workers():
+        while True:
+            time.sleep(30)
+            current_time = time.time()
+            for log_file in Path("/work3/s173955/data/freeze_detection/").glob("worker_*.log"):
+                try:
+                    with open(log_file, 'r') as f:
+                        last_line = f.read().strip().split('\n')[-1]
+                    timestamp, line_info, scene_frame = last_line.split('|')
+                    elapsed = current_time - float(timestamp)
+                    if elapsed > 60:
+                        logger.error(f"WORKER HANG: {log_file.stem} stuck at {line_info} for {elapsed:.1f}s on {scene_frame}")
+                except:
+                    pass
+    
+    thread = threading.Thread(target=check_workers, daemon=True)
+    thread.start()
+
+# Start monitoring
+monitor_workers()
+# === FREEZE DETECTION CODE - END ===
 
 def _generate_scene_counts(data_dir, split):
     counts_file = Path('/work3/s173955/bigdata/processed/scannetpp') / f"scene_counts_{split}.json"
@@ -299,15 +344,17 @@ class ScannetppStage1Dataset(Dataset):
         if scene_id in self._scene_metadata_cache:
             return self._scene_metadata_cache[scene_id]
         
-        raw_scene_path = scannetpp_raw_dir / "data" / scene_id
-        pose_intrinsic_file = raw_scene_path / "iphone" / "pose_intrinsic_imu.json"
+        track_line(scene_id); raw_scene_path = scannetpp_raw_dir / "data" / scene_id
+        track_line(scene_id); pose_intrinsic_file = raw_scene_path / "iphone" / "pose_intrinsic_imu.json"
         
+        track_line(scene_id)
         with open(pose_intrinsic_file, 'r') as f:
-            data = json.load(f)
+            track_line(scene_id); data = json.load(f)
         
         frame_to_pose = {}
         frame_to_intrinsic = {}
         
+        track_line(scene_id)
         for frame_key, frame_data in data.items():
             if not isinstance(frame_data, dict):
                 continue
@@ -342,7 +389,7 @@ class ScannetppStage1Dataset(Dataset):
             "frame_to_intrinsic": frame_to_intrinsic
         }
         
-        self._scene_metadata_cache[scene_id] = metadata
+        track_line(scene_id); self._scene_metadata_cache[scene_id] = metadata
         return metadata
 
     def map2color(self, labels):
@@ -379,19 +426,23 @@ class ScannetppStage1Dataset(Dataset):
 
         fname = self._data[idx]
         scene_id, frame_id = fname.split()
+        scene_frame = f"{scene_id}/{frame_id}"
+        
+        track_line(scene_frame)
         
         # Get paths for this scene
         raw_scene_path = scannetpp_raw_dir / "data" / scene_id
         processed_scene_path = scannetpp_processed_dir / "data" / scene_id
         
         # Verify scene directories exist
+        track_line(scene_frame)
         if not raw_scene_path.exists():
             raise FileNotFoundError(f"Raw scene directory not found: {raw_scene_path}")
         if not processed_scene_path.exists():
             raise FileNotFoundError(f"Processed scene directory not found: {processed_scene_path}")
         
         # Load RGB
-        color_path = processed_scene_path / "iphone" / "rgb" / f"{frame_id}.jpg"
+        track_line(scene_frame); color_path = processed_scene_path / "iphone" / "rgb" / f"{frame_id}.jpg"
         if not color_path.exists():
             color_path = processed_scene_path / "iphone" / "rgb" / f"{frame_id}.png"
             
@@ -399,36 +450,38 @@ class ScannetppStage1Dataset(Dataset):
             raise FileNotFoundError(f"RGB frame not found for scene {scene_id}, frame {frame_id}. Checked: {processed_scene_path / 'iphone' / 'rgb' / frame_id}.jpg and .png")
         
         try:
+            track_line(scene_frame)
             with Image.open(color_path) as img:
-                color_image = np.array(img.convert('RGB'))
-            color_image = cv2.resize(color_image, pointcloud_dims)
+                track_line(scene_frame); color_image = np.array(img.convert('RGB'))
+            track_line(scene_frame); color_image = cv2.resize(color_image, pointcloud_dims)
         except Exception as e:
             raise IOError(f"Error loading RGB image {color_path}: {e}")
 
         # Load Depth - critical file that must exist and be valid
-        depth_path = processed_scene_path / "iphone" / "depth" / f"{frame_id}.png"
+        track_line(scene_frame); depth_path = processed_scene_path / "iphone" / "depth" / f"{frame_id}.png"
         if not depth_path.exists():
             raise FileNotFoundError(f"Depth image not found for scene {scene_id}, frame {frame_id}: {depth_path}")
         
         try:
+            track_line(scene_frame)
             with Image.open(depth_path) as img:
-                depth_image = np.array(img, dtype=np.uint16)
+                track_line(scene_frame); depth_image = np.array(img, dtype=np.uint16)
             
             if depth_image.size == 0:
                 raise ValueError(f"Depth image is empty: {depth_path}")
             
-            depth_image = cv2.resize(depth_image, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
+            track_line(scene_frame); depth_image = cv2.resize(depth_image, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
         except Exception as e:
             raise IOError(f"Error loading depth image {depth_path}: {e}")
 
         # Get pose from metadata
-        scene_meta = self._get_scene_metadata(scene_id)
+        track_line(scene_frame); scene_meta = self._get_scene_metadata(scene_id)
         
         if frame_id not in scene_meta["frame_to_pose"]:
             available_frames = list(scene_meta["frame_to_pose"].keys())[:10]
             raise FileNotFoundError(f"No pose found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
         
-        pose = scene_meta["frame_to_pose"][frame_id]
+        track_line(scene_frame); pose = scene_meta["frame_to_pose"][frame_id]
 
         # Validate pose
         if pose.shape != (4, 4):
@@ -438,7 +491,7 @@ class ScannetppStage1Dataset(Dataset):
             available_frames = list(scene_meta["frame_to_intrinsic"].keys())[:10]
             raise FileNotFoundError(f"No intrinsic found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
         
-        depth_intrinsic = scene_meta["frame_to_intrinsic"][frame_id].copy()
+        track_line(scene_frame); depth_intrinsic = scene_meta["frame_to_intrinsic"][frame_id].copy()
         
         # Scale intrinsics from original resolution (1920x1440) to pointcloud_dims (256x192)
         scale_x = pointcloud_dims[0] / 1920.0
@@ -449,35 +502,36 @@ class ScannetppStage1Dataset(Dataset):
         depth_intrinsic[1, 2] *= scale_y
 
         # Load SAM mask
-        sam_path = processed_scene_path / self.sam_folder / f"{frame_id}.png"
+        track_line(scene_frame); sam_path = processed_scene_path / self.sam_folder / f"{frame_id}.png"
         if not sam_path.exists():
             raise FileNotFoundError(f"SAM mask not found for scene {scene_id}, frame {frame_id}: {sam_path}")
         
         try:
+            track_line(scene_frame)
             with open(sam_path, 'rb') as image_file:
-                img = Image.open(image_file)
-                sam_groups = np.array(img, dtype=np.int16)
+                track_line(scene_frame); img = Image.open(image_file)
+                track_line(scene_frame); sam_groups = np.array(img, dtype=np.int16)
                 
             if sam_groups.size == 0:
                 raise ValueError(f"SAM mask is empty: {sam_path}")
             
-            sam_groups = cv2.resize(sam_groups, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
+            track_line(scene_frame); sam_groups = cv2.resize(sam_groups, pointcloud_dims, interpolation=cv2.INTER_NEAREST)
                 
         except Exception as e:
             raise IOError(f"Error loading SAM mask {sam_path}: {e}")
 
         # Validate depth mask and check for valid depth values
-        mask = (depth_image != 0)
+        track_line(scene_frame); mask = (depth_image != 0)
         if not np.any(mask):
             raise ValueError(f"Depth image contains no valid depth values (all zeros): {depth_path}")
         
         try:
-            colors = np.reshape(color_image[mask], [-1, 3])
-            sam_groups = sam_groups[mask]
+            track_line(scene_frame); colors = np.reshape(color_image[mask], [-1, 3])
+            track_line(scene_frame); sam_groups = sam_groups[mask]
         except Exception as e:
             raise ValueError(f"Error applying depth mask for scene {scene_id}, frame {frame_id}: {e}")
 
-        depth_shift = 1000.0
+        track_line(scene_frame); depth_shift = 1000.0
         x, y = np.meshgrid(
             np.linspace(0, depth_image.shape[1] - 1, depth_image.shape[1]), 
             np.linspace(0, depth_image.shape[0] - 1, depth_image.shape[0])
@@ -492,6 +546,7 @@ class ScannetppStage1Dataset(Dataset):
         if uv_depth.size == 0:
             raise ValueError(f"No valid depth points after filtering for scene {scene_id}, frame {frame_id}")
         
+        track_line(scene_frame)
         fx = depth_intrinsic[0, 0]
         fy = depth_intrinsic[1, 1]
         cx = depth_intrinsic[0, 2]
@@ -506,11 +561,11 @@ class ScannetppStage1Dataset(Dataset):
         points[:, 2] = uv_depth[:, 2]
         
         try:
-            points_world = np.dot(points, np.transpose(pose))
+            track_line(scene_frame); points_world = np.dot(points, np.transpose(pose))
         except Exception as e:
             raise ValueError(f"Error transforming points to world coordinates for scene {scene_id}, frame {frame_id}: {e}")
             
-        sam_groups = self.num_to_natural(sam_groups)
+        track_line(scene_frame); sam_groups = self.num_to_natural(sam_groups)
 
         counts = Counter(sam_groups)
         for num, count in counts.items():
@@ -518,6 +573,7 @@ class ScannetppStage1Dataset(Dataset):
                 sam_groups[sam_groups == num] = -1
         sam_groups = self.num_to_natural(sam_groups)
 
+        track_line(scene_frame)
         coordinates = points_world[:, :3]
         color = colors
         normals = np.ones_like(coordinates)
@@ -536,8 +592,10 @@ class ScannetppStage1Dataset(Dataset):
             color = np.ones((len(color), 3))
 
         # volume and image augmentations for train
+        track_line(scene_frame)
         if "train" in self.mode or self.is_tta:
             if self.cropping:
+                track_line(scene_frame)
                 new_idx = self.random_cuboid(
                     coordinates,
                     labels[:, 1],
@@ -551,7 +609,7 @@ class ScannetppStage1Dataset(Dataset):
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
 
-            coordinates -= coordinates.mean(0)
+            track_line(scene_frame); coordinates -= coordinates.mean(0)
             try:
                 coordinates += (
                     np.random.uniform(coordinates.min(0), coordinates.max(0))
@@ -566,8 +624,9 @@ class ScannetppStage1Dataset(Dataset):
                 raise NotImplementedError("Instance oversampling not implemented for ScanNet++")
 
             if self.flip_in_center:
-                coordinates = flip_in_center(coordinates)
+                track_line(scene_frame); coordinates = flip_in_center(coordinates)
 
+            track_line(scene_frame)
             for i in (0, 1):
                 if random() < 0.5:
                     coord_max = np.max(coordinates[:, i])
@@ -575,10 +634,12 @@ class ScannetppStage1Dataset(Dataset):
 
             if random() < 0.95:
                 if self.is_elastic_distortion:
+                    track_line(scene_frame)
                     for granularity, magnitude in ((0.2, 0.4), (0.8, 1.6)):
                         coordinates = elastic_distortion(
                             coordinates, granularity, magnitude
                         )
+            track_line(scene_frame)
             aug = self.volume_augmentations(
                 points=coordinates,
                 normals=normals,
@@ -591,12 +652,13 @@ class ScannetppStage1Dataset(Dataset):
                 aug["normals"],
                 aug["labels"],
             )
-            pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
+            track_line(scene_frame); pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
             color = np.squeeze(
                 self.image_augmentations(image=pseudo_image)["image"]
             )
 
             if self.point_per_cut != 0:
+                track_line(scene_frame)
                 number_of_cuts = int(len(coordinates) / self.point_per_cut)
                 for _ in range(number_of_cuts):
                     size_of_cut = np.random.uniform(0.05, self.max_cut_region)
@@ -619,6 +681,7 @@ class ScannetppStage1Dataset(Dataset):
                     )
             
             if self.noise_rate > 0:
+                track_line(scene_frame)
                 coordinates, color, normals, labels = random_points(
                     coordinates,
                     color,
@@ -629,6 +692,7 @@ class ScannetppStage1Dataset(Dataset):
                 )
 
             if (self.resample_points > 0) or (self.noise_rate > 0):
+                track_line(scene_frame)
                 coordinates, color, normals, labels = random_around_points(
                     coordinates,
                     color,
@@ -640,10 +704,10 @@ class ScannetppStage1Dataset(Dataset):
                 )
 
             if random() < self.color_drop:
-                color[:] = 255
+                track_line(scene_frame); color[:] = 255
 
         # normalize color information
-        pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
+        track_line(scene_frame); pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
         color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
         # prepare labels and map from 0 to 20(40)
         labels = labels.astype(np.int32)
@@ -658,6 +722,7 @@ class ScannetppStage1Dataset(Dataset):
             else:
                 features = np.hstack((features, coordinates))
 
+        track_line(scene_frame)
         return (
             coordinates,
             features,
