@@ -22,14 +22,28 @@ import copy
 import json
 import re
 
-# Import the provided utilities
 from thes.paths import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
-
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
 pointcloud_dims = (256, 192)
+
+
+def _generate_scene_counts(data_dir, split):
+    counts_file = Path(data_dir) / f"scene_counts_{split}.json"
+    if counts_file.exists():
+        return
+    
+    counts = {}
+    for raw_scene_path, processed_scene_path in iterate_scannetpp(split):
+        scene_id = raw_scene_path.name
+        rgb_dir = processed_scene_path / "iphone" / "rgb"
+        frame_count = len(list(rgb_dir.glob("*.jpg")) + list(rgb_dir.glob("*.png")))
+        counts[scene_id] = frame_count
+    
+    with open(counts_file, 'w') as f:
+        json.dump(counts, f)
 
 
 class ScannetppStage1Dataset(Dataset):
@@ -134,7 +148,7 @@ class ScannetppStage1Dataset(Dataset):
         )
 
         self.mode = mode
-        self.data_dir = data_dir
+        self.data_dir = Path(data_dir)
         self.add_unlabeled_pc = add_unlabeled_pc
         if add_unlabeled_pc:
             raise NotImplementedError("add_unlabeled_pc not implemented for ScanNet++")
@@ -152,14 +166,13 @@ class ScannetppStage1Dataset(Dataset):
         self.noise_rate = noise_rate
         self.resample_points = resample_points
 
-        # Discover scene/frame pairs using iterate_scannetpp
-        self._data = self._discover_scene_frame_pairs()
+        split_map = {"train": "train", "validation": "val", "val": "val"}
+        self.split = split_map.get(self.mode, self.mode)
         
-        # Load labels (simplified for binary classification)
+        _generate_scene_counts(self.data_dir, self.split)
+        self._data = self._discover_scene_frame_pairs()
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
-
-        # Load scene metadata (intrinsics and poses)
-        self.scene_metadata = self._load_scene_metadata()
+        self._scene_metadata_cache = {}
         
         if data_percent < 1.0:
             self._data = sample(
@@ -189,13 +202,18 @@ class ScannetppStage1Dataset(Dataset):
             self.normalize_color = A.Normalize(mean=color_mean, std=color_std)
 
         self.cache_data = cache_data
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_scene_metadata_cache'] = {}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._scene_metadata_cache = {}
         
     @staticmethod
-    def load_specific_frame(scene_id, frame_id):
-        import json
-        import numpy as np
-        from thes.paths import scannetpp_raw_dir
-        
+    def load_specific_frame(scene_id, frame_id):       
         dataset = ScannetppStage1Dataset(
             mode="validation",
             point_per_cut=0,
@@ -215,7 +233,7 @@ class ScannetppStage1Dataset(Dataset):
         if pose.shape == (16,):
             pose = pose.reshape(4, 4)
         
-        dataset.scene_metadata[scene_id] = {
+        dataset._scene_metadata_cache[scene_id] = {
             "frame_to_pose": {frame_id: pose},
             "frame_to_intrinsic": {frame_id: np.array(frame_data["intrinsic"])}
         }
@@ -232,174 +250,99 @@ class ScannetppStage1Dataset(Dataset):
             self.mode = original_mode
 
     def _discover_scene_frame_pairs(self):
+        counts_file = self.data_dir / f"scene_counts_{self.split}.json"
+        with open(counts_file, 'r') as f:
+            scene_counts = json.load(f)
+        
+        scene_counts = {k: v for k, v in scene_counts.items() if k not in self.excluded_scenes}
+        total_frames = sum(scene_counts.values())
         pairs = []
-        total_rgb_count = 0
-        scene_data = []
         
-        split_map = {"train": "train", "validation": "val", "val": "val"}
-        split = split_map.get(self.mode, self.mode)
-        
-        for raw_scene_path, processed_scene_path in iterate_scannetpp(split):
-            scene_id = raw_scene_path.name
-            
-            if scene_id in self.excluded_scenes:
-                continue
-            
-            rgb_dir = processed_scene_path / "iphone" / "rgb"
-            if not rgb_dir.exists():
-                raise FileNotFoundError(f"RGB directory missing: {rgb_dir}")
+        if self.max_frames and self.max_frames < total_frames:
+            sample_rate = self.max_frames / total_frames
+            for scene_id, frame_count in scene_counts.items():
+                n_samples = max(1, round(frame_count * sample_rate))
+                processed_scene_path = scannetpp_processed_dir / "data" / scene_id
+                rgb_dir = processed_scene_path / "iphone" / "rgb"
                 
-            rgb_frames = [f.stem for f in rgb_dir.glob("*.jpg")] + [f.stem for f in rgb_dir.glob("*.png")]
-            if not rgb_frames:
-                raise FileNotFoundError(f"No RGB frames found: {rgb_dir}")
-                
-            total_rgb_count += len(rgb_frames)
-            scene_data.append((scene_id, processed_scene_path, rgb_frames))
-        
-        if total_rgb_count == 0:
-            raise ValueError(f"No RGB frames found for split '{self.mode}'")
-        
-        if self.max_frames and self.max_frames < total_rgb_count:
-            sample_rate = self.max_frames / total_rgb_count
-            print(f"Sampling: {total_rgb_count} -> {self.max_frames} frames (rate={sample_rate:.3f})")
-            
-            for scene_id, processed_path, rgb_frames in scene_data:
-                n_samples = max(1, int(len(rgb_frames) * sample_rate))
-                
-                frame_data = [(f, self._extract_frame_number(f)) for f in rgb_frames]
+                frame_files = list(rgb_dir.glob("*.jpg")) + list(rgb_dir.glob("*.png"))
+                frame_data = [(f.stem, self._extract_frame_number(f.stem)) for f in frame_files]
                 frame_data.sort(key=lambda x: x[1])
                 
-                indices = np.linspace(0, len(frame_data) - 1, n_samples, dtype=int)
-                selected = [frame_data[i][0] for i in indices]
+                if n_samples >= len(frame_data):
+                    selected = [f[0] for f in frame_data]
+                else:
+                    indices = np.linspace(0, len(frame_data) - 1, n_samples, dtype=int)
+                    selected = [frame_data[i][0] for i in indices]
                 
-                self._validate_frames(scene_id, processed_path, selected)
                 pairs.extend([f"{scene_id} {f}" for f in selected])
         else:
-            for scene_id, processed_path, rgb_frames in scene_data:
-                depth_dir = processed_path / "iphone" / "depth"
-                mask_dir = processed_path / self.sam_folder
+            for scene_id, frame_count in scene_counts.items():
+                processed_scene_path = scannetpp_processed_dir / "data" / scene_id
+                rgb_dir = processed_scene_path / "iphone" / "rgb"
+                rgb_frames = {f.stem for f in rgb_dir.glob("*.jpg")} | {f.stem for f in rgb_dir.glob("*.png")}
                 
-                if not depth_dir.exists():
-                    raise FileNotFoundError(f"Depth directory missing: {depth_dir}")
-                if not mask_dir.exists():
-                    raise FileNotFoundError(f"Mask directory missing: {mask_dir}")
-                
-                depth_frames = {f.stem for f in depth_dir.glob("*.png")}
-                mask_frames = {f.stem for f in mask_dir.glob("*.png")}
-                valid_frames = set(rgb_frames) & depth_frames & mask_frames
-                
-                if not valid_frames:
+                if not rgb_frames:
                     raise FileNotFoundError(f"No matching frames for scene {scene_id}")
                 
-                valid_frame_data = [(f, self._extract_frame_number(f)) for f in valid_frames]
+                valid_frame_data = [(f, self._extract_frame_number(f)) for f in rgb_frames]
                 valid_frame_data.sort(key=lambda x: x[1])
                 pairs.extend([f"{scene_id} {f[0]}" for f in valid_frame_data])
         
-        print(f"Found {len(pairs)} valid scene/frame pairs")
         return pairs
 
     def _extract_frame_number(self, frame_id):
         match = re.search(r'frame_(\d+)', frame_id)
         return int(match.group(1)) if match else 0
 
-    def _validate_frames(self, scene_id, scene_path, frame_ids):
-        depth_dir = scene_path / "iphone" / "depth"
-        mask_dir = scene_path / self.sam_folder
+    def _get_scene_metadata(self, scene_id):
+        if scene_id in self._scene_metadata_cache:
+            return self._scene_metadata_cache[scene_id]
         
-        if not depth_dir.exists():
-            raise FileNotFoundError(f"Depth directory missing: {depth_dir}")
-        if not mask_dir.exists():
-            raise FileNotFoundError(f"Mask directory missing: {mask_dir}")
+        raw_scene_path = scannetpp_raw_dir / "data" / scene_id
+        pose_intrinsic_file = raw_scene_path / "iphone" / "pose_intrinsic_imu.json"
         
-        for frame_id in frame_ids:
-            if not (depth_dir / f"{frame_id}.png").exists():
-                raise FileNotFoundError(f"Missing depth: {scene_id}/{frame_id}")
-            if not (mask_dir / f"{frame_id}.png").exists():
-                raise FileNotFoundError(f"Missing mask: {scene_id}/{frame_id}")
-
-    def _load_scene_metadata(self):
-        """Load intrinsics and poses for all scenes"""
-        metadata = {}
+        with open(pose_intrinsic_file, 'r') as f:
+            data = json.load(f)
         
-        split_map = {"train": "train", "validation": "val", "val": "val"}
-        split = split_map.get(self.mode, self.mode)
+        frame_to_pose = {}
+        frame_to_intrinsic = {}
         
-        for raw_scene_path, _ in iterate_scannetpp(split):
-            scene_id = raw_scene_path.name
-            
-            # Skip excluded scenes
-            if scene_id in self.excluded_scenes:
+        for frame_key, frame_data in data.items():
+            if not isinstance(frame_data, dict):
                 continue
             
-            # Check if raw scene path exists
-            if not raw_scene_path.exists():
-                raise FileNotFoundError(f"Raw scene directory not found: {raw_scene_path}")
+            if "intrinsic" in frame_data:
+                intrinsic_matrix = np.array(frame_data["intrinsic"])
+                if intrinsic_matrix.shape != (3, 3):
+                    raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsic_matrix.shape} for scene {scene_id}, frame {frame_key}")
+                frame_to_intrinsic[frame_key] = intrinsic_matrix
             
-            # Load pose_intrinsic_imu.json from raw directory
-            pose_intrinsic_file = raw_scene_path / "iphone" / "pose_intrinsic_imu.json"
+            pose_matrix = None
+            if "aligned_pose" in frame_data:
+                pose_matrix = np.array(frame_data["aligned_pose"])
+            elif "pose" in frame_data:
+                pose_matrix = np.array(frame_data["pose"])
             
-            if not pose_intrinsic_file.exists():
-                raise FileNotFoundError(f"Missing pose_intrinsic_imu.json for scene {scene_id}: {pose_intrinsic_file}")
-            
-            try:
-                with open(pose_intrinsic_file, 'r') as f:
-                    data = json.load(f)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON in pose_intrinsic_imu.json for scene {scene_id}: {e}")
-            except Exception as e:
-                raise IOError(f"Error reading pose_intrinsic_imu.json for scene {scene_id}: {e}")
-            
-            # Extract frame data - each frame has its own intrinsic and pose
-            frame_to_pose = {}
-            frame_to_intrinsic = {}
-            
-            try:
-                for frame_key, frame_data in data.items():
-                    if not isinstance(frame_data, dict):
-                        continue
-                    
-                    frame_id = frame_key
-                    
-                    # Extract intrinsic matrix for this frame
-                    if "intrinsic" in frame_data:
-                        intrinsic_matrix = np.array(frame_data["intrinsic"])
-                        if intrinsic_matrix.shape != (3, 3):
-                            raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsic_matrix.shape} for scene {scene_id}, frame {frame_id}")
-                        frame_to_intrinsic[frame_id] = intrinsic_matrix
-                    
-                    # Extract pose matrix for this frame (prefer aligned_pose if available)
-                    pose_matrix = None
-                    if "aligned_pose" in frame_data:
-                        pose_matrix = np.array(frame_data["aligned_pose"])
-                    elif "pose" in frame_data:
-                        pose_matrix = np.array(frame_data["pose"])
-                    
-                    if pose_matrix is not None:
-                        if pose_matrix.shape == (4, 4):
-                            frame_to_pose[frame_id] = pose_matrix
-                        elif pose_matrix.shape == (16,):
-                            frame_to_pose[frame_id] = pose_matrix.reshape(4, 4)
-                        else:
-                            raise ValueError(f"Invalid pose shape {pose_matrix.shape} for scene {scene_id}, frame {frame_id}")
-                            
-            except Exception as e:
-                raise ValueError(f"Error parsing frame data for scene {scene_id}: {e}")
-            
-            if not frame_to_pose:
-                raise ValueError(f"No valid poses found for scene {scene_id}")
-            
-            if not frame_to_intrinsic:
-                raise ValueError(f"No valid intrinsics found for scene {scene_id}")
-            
-            # Store both poses and intrinsics per frame
-            metadata[scene_id] = {
-                "frame_to_pose": frame_to_pose,
-                "frame_to_intrinsic": frame_to_intrinsic
-            }
-            
-        if not metadata:
-            raise ValueError(f"No scene metadata loaded for split '{self.mode}'")
-            
+            if pose_matrix is not None:
+                if pose_matrix.shape == (4, 4):
+                    frame_to_pose[frame_key] = pose_matrix
+                elif pose_matrix.shape == (16,):
+                    frame_to_pose[frame_key] = pose_matrix.reshape(4, 4)
+                else:
+                    raise ValueError(f"Pose matrix should be 4x4 or 16-element array, got {pose_matrix.shape} for scene {scene_id}, frame {frame_key}")
+        
+        if not frame_to_pose:
+            raise ValueError(f"No valid poses found for scene {scene_id}")
+        if not frame_to_intrinsic:
+            raise ValueError(f"No valid intrinsics found for scene {scene_id}")
+        
+        metadata = {
+            "frame_to_pose": frame_to_pose,
+            "frame_to_intrinsic": frame_to_intrinsic
+        }
+        
+        self._scene_metadata_cache[scene_id] = metadata
         return metadata
 
     def map2color(self, labels):
@@ -479,10 +422,7 @@ class ScannetppStage1Dataset(Dataset):
             raise IOError(f"Error loading depth image {depth_path}: {e}")
 
         # Get pose from metadata
-        if scene_id not in self.scene_metadata:
-            raise FileNotFoundError(f"No metadata loaded for scene {scene_id}")
-            
-        scene_meta = self.scene_metadata[scene_id]
+        scene_meta = self._get_scene_metadata(scene_id)
         
         if frame_id not in scene_meta["frame_to_pose"]:
             available_frames = list(scene_meta["frame_to_pose"].keys())[:10]
@@ -677,6 +617,16 @@ class ScannetppStage1Dataset(Dataset):
                         color[~indexes],
                         labels[~indexes],
                     )
+            
+            if self.noise_rate > 0:
+                coordinates, color, normals, labels = random_points(
+                    coordinates,
+                    color,
+                    normals,
+                    labels,
+                    self.noise_rate,
+                    self.ignore_label,
+                )
 
             if (self.resample_points > 0) or (self.noise_rate > 0):
                 coordinates, color, normals, labels = random_around_points(
