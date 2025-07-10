@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 pointcloud_dims = (256, 192)
 
-
 def _generate_scene_counts(data_dir, split):
     counts_file = Path('/work3/s173955/bigdata/processed/scannetpp') / f"scene_counts_{split}.json"
     if counts_file.exists():
@@ -172,7 +171,6 @@ class ScannetppStage1Dataset(Dataset):
         _generate_scene_counts(self.data_dir, self.split)
         self._data = self._discover_scene_frame_pairs()
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
-        self._scene_metadata_cache = {}
         
         if data_percent < 1.0:
             self._data = sample(
@@ -203,52 +201,32 @@ class ScannetppStage1Dataset(Dataset):
 
         self.cache_data = cache_data
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state['_scene_metadata_cache'] = {}
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self._scene_metadata_cache = {}
-        
-    @staticmethod
-    def load_specific_frame(scene_id, frame_id):       
+    @staticmethod  
+    def load_specific_frame(scene_id, frame_id):
+        """Load a specific frame using the dataset class (no augmentations)"""
         dataset = ScannetppStage1Dataset(
             mode="validation",
             point_per_cut=0,
             cropping=False,
             is_tta=False,
-            scenes_to_exclude="dfac5b38df,00dd871005,c4c04e6d6c"
+            scenes_to_exclude="dfac5b38df,00dd871005,c4c04e6d6c",
+            image_augmentations_path=None,
+            volume_augmentations_path=None,
+            noise_rate=0,
+            resample_points=0,
+            flip_in_center=False,
+            is_elastic_distortion=False,
+            color_drop=0.0
         )
+        
+        # Override the data to only contain our specific frame
         dataset._data = [f"{scene_id} {frame_id}"]
-        dataset.mode = "validation"
         
-        pose_file = scannetpp_raw_dir / "data" / scene_id / "iphone" / "pose_intrinsic_imu.json"
-        with open(pose_file, 'r') as f:
-            data = json.load(f)
+        # Get the sample (idx=0)
+        sample = dataset[0]
         
-        frame_data = data[frame_id]
-        pose = np.array(frame_data.get("aligned_pose", frame_data["pose"]))
-        if pose.shape == (16,):
-            pose = pose.reshape(4, 4)
-        
-        dataset._scene_metadata_cache[scene_id] = {
-            "frame_to_pose": {frame_id: pose},
-            "frame_to_intrinsic": {frame_id: np.array(frame_data["intrinsic"])}
-        }
-        
-        sample = dataset.get_raw_sample(0)
+        # Return coordinates, raw_color, labels
         return sample[0], sample[4], sample[2]
-
-    def get_raw_sample(self, idx):
-        original_mode = self.mode
-        self.mode = "validation"
-        try:
-            return self.__getitem__(idx)
-        finally:
-            self.mode = original_mode
-
     def _discover_scene_frame_pairs(self):
         counts_file = Path('/work3/s173955/bigdata/processed/scannetpp') / f"scene_counts_{self.split}.json"
         with open(counts_file, 'r') as f:
@@ -295,55 +273,44 @@ class ScannetppStage1Dataset(Dataset):
         match = re.search(r'frame_(\d+)', frame_id)
         return int(match.group(1)) if match else 0
 
-    def _get_scene_metadata(self, scene_id):
-        if scene_id in self._scene_metadata_cache:
-            return self._scene_metadata_cache[scene_id]
-        
+    def _load_pose_and_intrinsic(self, scene_id, frame_id):
+        """Load pose and intrinsic for a specific frame - no caching!"""
         raw_scene_path = scannetpp_raw_dir / "data" / scene_id
         pose_intrinsic_file = raw_scene_path / "iphone" / "pose_intrinsic_imu.json"
         
         with open(pose_intrinsic_file, 'r') as f:
             data = json.load(f)
         
-        frame_to_pose = {}
-        frame_to_intrinsic = {}
+        if frame_id not in data:
+            raise KeyError(f"Frame {frame_id} not found in pose_intrinsic_imu.json for scene {scene_id}")
         
-        for frame_key, frame_data in data.items():
-            if not isinstance(frame_data, dict):
-                continue
-            
-            if "intrinsic" in frame_data:
-                intrinsic_matrix = np.array(frame_data["intrinsic"])
-                if intrinsic_matrix.shape != (3, 3):
-                    raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsic_matrix.shape} for scene {scene_id}, frame {frame_key}")
-                frame_to_intrinsic[frame_key] = intrinsic_matrix
-            
-            pose_matrix = None
-            if "aligned_pose" in frame_data:
-                pose_matrix = np.array(frame_data["aligned_pose"])
-            elif "pose" in frame_data:
-                pose_matrix = np.array(frame_data["pose"])
-            
-            if pose_matrix is not None:
-                if pose_matrix.shape == (4, 4):
-                    frame_to_pose[frame_key] = pose_matrix
-                elif pose_matrix.shape == (16,):
-                    frame_to_pose[frame_key] = pose_matrix.reshape(4, 4)
-                else:
-                    raise ValueError(f"Pose matrix should be 4x4 or 16-element array, got {pose_matrix.shape} for scene {scene_id}, frame {frame_key}")
+        frame_data = data[frame_id]
         
-        if not frame_to_pose:
-            raise ValueError(f"No valid poses found for scene {scene_id}")
-        if not frame_to_intrinsic:
-            raise ValueError(f"No valid intrinsics found for scene {scene_id}")
+        # Get intrinsic matrix
+        if "intrinsic" not in frame_data:
+            raise ValueError(f"No intrinsic data for scene {scene_id}, frame {frame_id}")
         
-        metadata = {
-            "frame_to_pose": frame_to_pose,
-            "frame_to_intrinsic": frame_to_intrinsic
-        }
+        intrinsic_matrix = np.array(frame_data["intrinsic"])
+        if intrinsic_matrix.shape != (3, 3):
+            raise ValueError(f"Intrinsics matrix should be 3x3, got {intrinsic_matrix.shape}")
         
-        self._scene_metadata_cache[scene_id] = metadata
-        return metadata
+        # Get pose matrix
+        pose_matrix = None
+        if "aligned_pose" in frame_data:
+            pose_matrix = np.array(frame_data["aligned_pose"])
+        elif "pose" in frame_data:
+            pose_matrix = np.array(frame_data["pose"])
+        else:
+            raise ValueError(f"No pose data for scene {scene_id}, frame {frame_id}")
+        
+        if pose_matrix.shape == (4, 4):
+            pass  # Already correct shape
+        elif pose_matrix.shape == (16,):
+            pose_matrix = pose_matrix.reshape(4, 4)
+        else:
+            raise ValueError(f"Pose matrix should be 4x4 or 16-element array, got {pose_matrix.shape}")
+        
+        return pose_matrix, intrinsic_matrix
 
     def map2color(self, labels):
         output_colors = list()
@@ -379,6 +346,7 @@ class ScannetppStage1Dataset(Dataset):
 
         fname = self._data[idx]
         scene_id, frame_id = fname.split()
+        scene_frame = f"{scene_id}/{frame_id}"
         
         # Get paths for this scene
         raw_scene_path = scannetpp_raw_dir / "data" / scene_id
@@ -396,7 +364,7 @@ class ScannetppStage1Dataset(Dataset):
             color_path = processed_scene_path / "iphone" / "rgb" / f"{frame_id}.png"
             
         if not color_path.exists():
-            raise FileNotFoundError(f"RGB frame not found for scene {scene_id}, frame {frame_id}. Checked: {processed_scene_path / 'iphone' / 'rgb' / frame_id}.jpg and .png")
+            raise FileNotFoundError(f"RGB frame not found for scene {scene_id}, frame {frame_id}")
         
         try:
             with Image.open(color_path) as img:
@@ -405,10 +373,10 @@ class ScannetppStage1Dataset(Dataset):
         except Exception as e:
             raise IOError(f"Error loading RGB image {color_path}: {e}")
 
-        # Load Depth - critical file that must exist and be valid
+        # Load Depth
         depth_path = processed_scene_path / "iphone" / "depth" / f"{frame_id}.png"
         if not depth_path.exists():
-            raise FileNotFoundError(f"Depth image not found for scene {scene_id}, frame {frame_id}: {depth_path}")
+            raise FileNotFoundError(f"Depth image not found for scene {scene_id}, frame {frame_id}")
         
         try:
             with Image.open(depth_path) as img:
@@ -421,28 +389,13 @@ class ScannetppStage1Dataset(Dataset):
         except Exception as e:
             raise IOError(f"Error loading depth image {depth_path}: {e}")
 
-        # Get pose from metadata
-        scene_meta = self._get_scene_metadata(scene_id)
-        
-        if frame_id not in scene_meta["frame_to_pose"]:
-            available_frames = list(scene_meta["frame_to_pose"].keys())[:10]
-            raise FileNotFoundError(f"No pose found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
-        
-        pose = scene_meta["frame_to_pose"][frame_id]
-
-        # Validate pose
-        if pose.shape != (4, 4):
-            raise ValueError(f"Invalid pose shape {pose.shape} for scene {scene_id}, frame {frame_id}. Expected (4, 4)")
-
-        if frame_id not in scene_meta["frame_to_intrinsic"]:
-            available_frames = list(scene_meta["frame_to_intrinsic"].keys())[:10]
-            raise FileNotFoundError(f"No intrinsic found for scene {scene_id}, frame {frame_id}. Available frames (first 10): {available_frames}")
-        
-        depth_intrinsic = scene_meta["frame_to_intrinsic"][frame_id].copy()
+        # Load pose and intrinsic - NO CACHING!
+        pose, depth_intrinsic = self._load_pose_and_intrinsic(scene_id, frame_id)
         
         # Scale intrinsics from original resolution (1920x1440) to pointcloud_dims (256x192)
         scale_x = pointcloud_dims[0] / 1920.0
         scale_y = pointcloud_dims[1] / 1440.0
+        depth_intrinsic = depth_intrinsic.copy()
         depth_intrinsic[0, 0] *= scale_x
         depth_intrinsic[1, 1] *= scale_y
         depth_intrinsic[0, 2] *= scale_x
@@ -451,7 +404,7 @@ class ScannetppStage1Dataset(Dataset):
         # Load SAM mask
         sam_path = processed_scene_path / self.sam_folder / f"{frame_id}.png"
         if not sam_path.exists():
-            raise FileNotFoundError(f"SAM mask not found for scene {scene_id}, frame {frame_id}: {sam_path}")
+            raise FileNotFoundError(f"SAM mask not found for scene {scene_id}, frame {frame_id}")
         
         try:
             with open(sam_path, 'rb') as image_file:
@@ -658,6 +611,14 @@ class ScannetppStage1Dataset(Dataset):
             else:
                 features = np.hstack((features, coordinates))
 
+        # CRITICAL: Make all arrays contiguous before returning
+        coordinates = np.ascontiguousarray(coordinates, dtype=np.float32)
+        features = np.ascontiguousarray(features, dtype=np.float32)
+        labels = np.ascontiguousarray(labels, dtype=np.int32)
+        raw_color = np.ascontiguousarray(raw_color, dtype=np.float32)
+        raw_normals = np.ascontiguousarray(raw_normals, dtype=np.float32)
+        raw_coordinates = np.ascontiguousarray(raw_coordinates, dtype=np.float32)
+
         return (
             coordinates,
             features,
@@ -729,6 +690,7 @@ class ScannetppStage1Dataset(Dataset):
         return output_remapped
 
 
+# Keep the same helper functions
 def elastic_distortion(pointcloud, granularity, magnitude):
     """Apply elastic distortion on sparse coordinate space.
 
