@@ -17,8 +17,7 @@ def load_pose_and_intrinsic(scene_id, frame_id):
 def sample_frames(max_frames_req, split):
     scene_paths = list(iterate_scannetpp(split))
     scene_frames = []
-    
-    for p, _ in tqdm(scene_paths, desc=f"Counting frames ({split})"):
+    for p, *_ in tqdm(scene_paths, desc=f"Counting frames ({split})"):
         frame_paths = list((scannetpp_processed_dir / 'data' / p.name / 'iphone' / 'rgb').glob('*.jpg'))
         if frame_paths:
             frame_names = [f.stem for f in frame_paths]
@@ -40,9 +39,8 @@ def sample_frames(max_frames_req, split):
     
     factor = max_frames / total_available
     selected = []
-    
     for scene_id, frame_names in scene_frames:
-        n_select = int(len(frame_names) * factor)
+        n_select = round(len(frame_names) * factor)
         indices = np.linspace(0, len(frame_names) - 1, n_select, dtype=int)
         selected.extend((scene_id, frame_names[i]) for i in indices)
     
@@ -54,21 +52,12 @@ def sample_frames(max_frames_req, split):
     with open(output_dir / f'scannetpp_{max_frames_req}_{split}.txt', 'w') as f:
         f.writelines(f"{scene} {frame}\n" for scene, frame in selected)
     
-    first_intrinsic = None
     for scene_id, frame_id in selected:
         depth_path = scannetpp_processed_dir / 'data' / scene_id / 'iphone' / 'depth' / f"{frame_id}.png"
         if not depth_path.exists():
             raise FileNotFoundError(f"Depth frame missing: {depth_path}")
-        
         pose, intrinsic = load_pose_and_intrinsic(scene_id, frame_id)
-        if first_intrinsic is None:
-            first_intrinsic = intrinsic
-        elif not np.allclose(intrinsic, first_intrinsic):
-            raise ValueError(f"Intrinsic mismatch: {scene_id} {frame_id}")
-        
-        np.savetxt(poses_dir / f"{frame_id}.txt", pose)
-    
-    np.savetxt(output_dir / 'intrinsics.txt', first_intrinsic)
+        np.savez_compressed(poses_dir / f"{frame_id}.npz", pose=pose, intrinsics=intrinsic)
 
 def main(max_frames):
     for split in ['train', 'val']:
