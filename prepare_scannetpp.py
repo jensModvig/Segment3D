@@ -2,10 +2,17 @@ import numpy as np
 from pathlib import Path
 import sys
 import json
+import re
+import os
 from tqdm import tqdm
 from thes.paths import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
 
 pose_cache = {}
+
+def natural_sort(paths):
+    convert = lambda text: int(text) if text.isdigit() else text.lower()
+    alphanum_key = lambda path: [convert(c) for c in re.split('(\d+)', os.path.basename(str(path)))]
+    return sorted(paths, key=alphanum_key)
 
 def load_pose_and_intrinsic(scene_id, frame_id):
     if scene_id not in pose_cache:
@@ -26,9 +33,10 @@ def sample_frames(max_frames_req, split, skip_scenes=None):
     for p, *_ in tqdm(scene_paths, desc=f"Counting frames ({split})"):
         if p.name in skip_scenes:
             continue
-            
+        
         frame_paths = list((scannetpp_processed_dir / 'data' / p.name / 'iphone' / 'rgb').glob('*.jpg'))
         if frame_paths:
+            frame_paths = natural_sort(frame_paths)
             frame_names = [f.stem for f in frame_paths]
             scene_frames.append((p.name, frame_names))
         else:
@@ -48,8 +56,8 @@ def sample_frames(max_frames_req, split, skip_scenes=None):
         raise ValueError(f"Training requires {max_frames} frames but only {total_available} available")
     
     factor = max_frames / total_available
-    
     selected = []
+    
     for scene_id, frame_names in scene_frames:
         n_select = round(len(frame_names) * factor)
         indices = np.linspace(0, len(frame_names) - 1, n_select, dtype=int)
