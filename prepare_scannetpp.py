@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import json
 from tqdm import tqdm
-from thes import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
+from thes.paths import iterate_scannetpp, scannetpp_raw_dir, scannetpp_processed_dir
 
 pose_cache = {}
 
@@ -11,45 +11,48 @@ def load_pose_and_intrinsic(scene_id, frame_id):
     if scene_id not in pose_cache:
         with open(scannetpp_raw_dir / 'data' / scene_id / 'iphone' / 'pose_intrinsic_imu.json') as f:
             pose_cache[scene_id] = json.load(f)
-    
     data = pose_cache[scene_id][frame_id]
-    return np.array(data['aligned_pose']).reshape(4, 4), np.array(data["intrinsic"]).reshape(4, 4)
+    return np.array(data['aligned_pose']).reshape(4, 4), np.array(data["intrinsic"]).reshape(3, 3)
 
-def sample_frames(max_frames, split):
+def sample_frames(max_frames_req, split):
     scene_paths = list(iterate_scannetpp(split))
     scene_frames = []
     
     for p, _ in tqdm(scene_paths, desc=f"Counting frames ({split})"):
-        frame_count = len(list((scannetpp_processed_dir / 'data' / p.name / 'iphone' / 'rgb').glob('*.jpg')))
-        if frame_count > 0:
-            scene_frames.append((p.name, frame_count))
+        frame_paths = list((scannetpp_processed_dir / 'data' / p.name / 'iphone' / 'rgb').glob('*.jpg'))
+        if frame_paths:
+            frame_names = [f.stem for f in frame_paths]
+            scene_frames.append((p.name, frame_names))
         else:
             raise FileNotFoundError('Empty scene', p.name)
     
-    total_available = sum(c for _, c in scene_frames)
-    if total_available < max_frames:
-        raise ValueError(f"Training requires {max_frames} frames but only {total_available} available")
+    total_available = sum(len(frame_names) for _, frame_names in scene_frames)
+    if total_available < max_frames_req:
+        raise ValueError(f"Training requires {max_frames_req} frames but only {total_available} available")
     
     if split == 'val':
-        val_max_frames = round(max_frames * (21.877/78.123))
+        val_max_frames = round(max_frames_req * (21.877/78.123))
         if total_available < val_max_frames:
             raise ValueError(f"Validation requires {val_max_frames} frames but only {total_available} available")
         max_frames = val_max_frames
+    else:
+        max_frames = max_frames_req
     
     factor = max_frames / total_available
-    
     selected = []
-    for scene_id, count in scene_frames:
-        indices = np.linspace(0, int(count * factor) - 1, n, dtype=int)
-        selected.extend((scene_id, str(i)) for i in indices)
+    
+    for scene_id, frame_names in scene_frames:
+        n_select = int(len(frame_names) * factor)
+        indices = np.linspace(0, len(frame_names) - 1, n_select, dtype=int)
+        selected.extend((scene_id, frame_names[i]) for i in indices)
     
     output_dir = Path('/work3/s173955/Segment3D/data/processed/scannetpp_info')
     output_dir.mkdir(parents=True, exist_ok=True)
     poses_dir = output_dir / 'poses'
     poses_dir.mkdir(exist_ok=True)
     
-    with open(output_dir / f'scannetpp_{max_frames}_{split}.txt', 'w') as f:
-        f.writelines(f"{s} {i}\n" for s, i in selected)
+    with open(output_dir / f'scannetpp_{max_frames_req}_{split}.txt', 'w') as f:
+        f.writelines(f"{scene} {frame}\n" for scene, frame in selected)
     
     first_intrinsic = None
     for scene_id, frame_id in selected:
@@ -58,7 +61,6 @@ def sample_frames(max_frames, split):
             raise FileNotFoundError(f"Depth frame missing: {depth_path}")
         
         pose, intrinsic = load_pose_and_intrinsic(scene_id, frame_id)
-        
         if first_intrinsic is None:
             first_intrinsic = intrinsic
         elif not np.allclose(intrinsic, first_intrinsic):
