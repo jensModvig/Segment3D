@@ -47,8 +47,10 @@ def sample_frames(max_frames_req, split, skip_scenes=None):
     if split == 'val':
         val_max_frames = round(max_frames_req * (21.877/78.123))
         if total_available < val_max_frames:
-            raise ValueError(f"Validation requires {val_max_frames} frames but only {total_available} available")
-        max_frames = val_max_frames
+            print(f"WARNING - Validation requires {val_max_frames} frames but only {total_available} available")
+            max_frames = total_available
+        else:
+            max_frames = val_max_frames
     else:
         max_frames = max_frames_req
     

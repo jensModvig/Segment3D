@@ -27,9 +27,7 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 
-class SemanticSegmentationDataset(Dataset):
-    """Docstring for SemanticSegmentationDataset."""
-
+class ScannetppStage1Dataset(Dataset):
     def __init__(
         self,
         dataset_name="scannetpp",
@@ -79,7 +77,7 @@ class SemanticSegmentationDataset(Dataset):
         add_clip=False,
         is_elastic_distortion=True,
         color_drop=0.0,
-        max_frames: Optional[int] = None,
+        max_frames = None,
     ):
         assert task in [
             "instance_segmentation",
@@ -160,7 +158,7 @@ class SemanticSegmentationDataset(Dataset):
             data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val.txt')
             
         if not data_path.is_file():
-            raise FileNotFoundError(f'Cannot find {self.mod} file with {self.max_frames} max frames.')
+            raise FileNotFoundError(f'Cannot find {self.mode} file with {self.max_frames} max frames.')
             
         with open(data_path, "r") as scene_file:
             self._data = scene_file.read().splitlines()
@@ -201,6 +199,30 @@ class SemanticSegmentationDataset(Dataset):
         self.cache_data = cache_data
         if self.cache_data:
             raise ValueError('cache_data was apparently important')
+    
+    @staticmethod  
+    def load_specific_frame(scene_id, frame_id):
+        """Load a specific frame using the dataset class (no augmentations)"""
+        dataset = ScannetppStage1Dataset(
+            mode="validation",
+            point_per_cut=0,
+            cropping=False,
+            is_tta=False,
+            scenes_to_exclude="00dd871005,c4c04e6d6c",
+            image_augmentations_path=None,
+            volume_augmentations_path=None,
+            noise_rate=0,
+            resample_points=0,
+            flip_in_center=False,
+            is_elastic_distortion=False,
+            color_drop=0.0
+        )
+        
+        # Override the data to only contain our specific frame
+        dataset._data = [f"{scene_id} {frame_id}"]
+        
+        sample = dataset[0]
+        return sample[0], sample[4], sample[2]
 
     def get_raw_sample(self, idx):
         """Get raw sample without augmentations for debugging."""
@@ -298,16 +320,18 @@ class SemanticSegmentationDataset(Dataset):
             
         scannetpp_data = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
         scannetpp_info_path = Path('/work3/s173955/Segment3D/data/processed/scannetpp_info/')
+        rgb_dims = (1920, 1440)
+        depth_dims = (256, 192)
 
         fname = self.data[idx]
         scene_id, frame_id = fname.split()
         color_path = scannetpp_data / scene_id / 'iphone/rgb' / f'{frame_id}.jpg'
-        color_image = cv2.imread(color_path)
+        color_image = cv2.imread(str(color_path))
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-        color_image = cv2.resize(color_image, (256, 192))
+        color_image = cv2.resize(color_image, depth_dims)
 
         depth_path = scannetpp_data / scene_id / 'iphone/depth' / f'{frame_id}.png'        
-        depth_image = cv2.imread(depth_path, -1)
+        depth_image = cv2.imread(str(depth_path), -1)
 
         pose_intrinsic_data = np.load(scannetpp_info_path / 'poses' / scene_id / f'{frame_id}.npz')
         pose = pose_intrinsic_data['pose']
@@ -317,6 +341,7 @@ class SemanticSegmentationDataset(Dataset):
         with open(sam_path, 'rb') as image_file:
             img = Image.open(image_file)
             sam_groups = np.array(img, dtype=np.int16)
+            sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
 
         mask = (depth_image != 0)
         colors = np.reshape(color_image[mask], [-1,3])
@@ -331,18 +356,16 @@ class SemanticSegmentationDataset(Dataset):
         uv_depth = np.reshape(uv_depth, [-1,3])
         uv_depth = uv_depth[np.where(uv_depth[:,2]!=0),:].squeeze()
         
-        scales = np.array([256/1920, 192/1440, 1])
+        scales = np.array([depth_dims[0]/rgb_dims[0], depth_dims[1]/rgb_dims[1], 1])
         depth_intrinsic = color_intrinsics * scales[:, None]
         fx = depth_intrinsic[0,0]
         fy = depth_intrinsic[1,1]
         cx = depth_intrinsic[0,2]
         cy = depth_intrinsic[1,2]
-        bx = depth_intrinsic[0,3]
-        by = depth_intrinsic[1,3]
         n = uv_depth.shape[0]
         points = np.ones((n,4))
-        X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx + bx
-        Y = (uv_depth[:,1]-cy)*uv_depth[:,2]/fy + by
+        X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx
+        Y = (uv_depth[:,1]-cy)*uv_depth[:,2]/fy
         points[:,0] = X
         points[:,1] = Y
         points[:,2] = uv_depth[:,2]
