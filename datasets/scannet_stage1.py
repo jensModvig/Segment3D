@@ -112,7 +112,6 @@ class SemanticSegmentationDataset(Dataset):
         self.is_tta = is_tta
         self.on_crops = on_crops
         self.sam_folder = sam_folder
-        print('SAM folder is', self.sam_folder)
 
         # Handle scenes to exclude
         self.excluded_scenes = set()

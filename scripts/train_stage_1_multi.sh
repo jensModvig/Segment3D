@@ -8,7 +8,7 @@ if [ "$DATASET" == "scannetpp" ]; then
     echo "Training on ScanNet++ dataset"
     DATASET_CONFIG="scannetpp_stage1"
     SAM_FOLDER="gt_mask"
-    SCENES_TO_EXCLUDE=\'dfac5b38df,00dd871005,c4c04e6d6c\'
+    SCENES_TO_EXCLUDE=\'00dd871005,c4c04e6d6c\'
 else
     echo "Training on ScanNet dataset"
     DATASET_CONFIG="scannet_stage1"
@@ -30,5 +30,5 @@ CUDA_VISIBLE_DEVICES=0,1 python main_instance_segmentation_stage1.py \
     trainer.log_every_n_steps=50 \
     trainer.val_check_interval=2000 \
     general.save_visualizations=False \
-    general.gpus=2 \
+    general.gpus=1 \
     model.num_queries=100
