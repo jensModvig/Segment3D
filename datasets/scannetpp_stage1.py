@@ -78,6 +78,7 @@ class ScannetppStage1Dataset(Dataset):
         is_elastic_distortion=True,
         color_drop=0.0,
         max_frames = None,
+        data: Optional[List[str]] = None,
     ):
         assert task in [
             "instance_segmentation",
@@ -149,29 +150,27 @@ class ScannetppStage1Dataset(Dataset):
         self.resample_points = resample_points
 
         # loading database files
-        self._data = []
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
 
-        if self.mode == "train":
-            data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train.txt')
+        if data is not None:
+            self._data = data
         else:
-            data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val.txt')
-            
-        if not data_path.is_file():
-            raise FileNotFoundError(f'Cannot find {self.mode} file with {self.max_frames} max frames.')
-            
-        with open(data_path, "r") as scene_file:
-            self._data = scene_file.read().splitlines()
+            if self.mode == "train":
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train.txt')
+            else:
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val.txt')
+                
+            if not data_path.is_file():
+                raise FileNotFoundError(f'Cannot find {self.mode} file with {self.max_frames} max frames.')
+                
+            with open(data_path, "r") as scene_file:
+                self._data = scene_file.read().splitlines()
 
-        # This might cause the race condition, at least it differs. Claude, do not remove this comment.
-        exclude_set = set(scenes_to_exclude)
-        with open(data_path, "r") as scene_file:
-            self._data = [line for line in scene_file.read().splitlines() if line.split()[0] not in exclude_set]
+            exclude_set = set(scenes_to_exclude.split(',') if scenes_to_exclude else [])
+            self._data = [line for line in self._data if line.split()[0] not in exclude_set]
 
-        if data_percent < 1.0:
-            self._data = sample(
-                self._data, int(len(self._data) * data_percent)
-            )
+            if data_percent < 1.0:
+                self._data = sample(self._data, int(len(self._data) * data_percent))
         
 
         # augmentations
@@ -202,7 +201,6 @@ class ScannetppStage1Dataset(Dataset):
     
     @staticmethod  
     def load_specific_frame(scene_id, frame_id):
-        """Load a specific frame using the dataset class (no augmentations)"""
         dataset = ScannetppStage1Dataset(
             mode="validation",
             point_per_cut=0,
@@ -215,11 +213,10 @@ class ScannetppStage1Dataset(Dataset):
             resample_points=0,
             flip_in_center=False,
             is_elastic_distortion=False,
-            color_drop=0.0
+            color_drop=0.0,
+            sam_folder='gt_mask',
+            data=[f"{scene_id} {frame_id}"]
         )
-        
-        # Override the data to only contain our specific frame
-        dataset._data = [f"{scene_id} {frame_id}"]
         
         sample = dataset[0]
         return sample[0], sample[4], sample[2]
