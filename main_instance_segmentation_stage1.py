@@ -23,6 +23,7 @@ def get_parameters(cfg: DictConfig):
 
     if cfg.general.seed:
         seed_everything(cfg.general.seed, workers=True)
+        cfg.trainer.deterministic = True
 
     # getting basic configuration
     if cfg.general.get("gpus", None) is None:
@@ -84,7 +85,6 @@ def train(cfg: DictConfig):
         gpus=cfg.general.gpus,
         callbacks=callbacks,
         weights_save_path=str(cfg.general.save_dir),
-        deterministic=cfg.general.seed is not None,
         **cfg.trainer,
         limit_val_batches=100,
     )
@@ -106,7 +106,6 @@ def test(cfg: DictConfig):
         gpus=cfg.general.gpus,
         logger=loggers,
         weights_save_path=str(cfg.general.save_dir),
-        deterministic=cfg.general.seed is not None,
         **cfg.trainer,
     )
     runner.test(model)

@@ -513,7 +513,7 @@ class InstanceSegmentation(pl.LightningModule):
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
             if self.config.trainer.deterministic:
-                torch.use_deterministic_algorithms(True)
+                torch.use_deterministic_algorithms(True, warn_only=True)
 
 
         self.eval_instance_step(

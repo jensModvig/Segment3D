@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: scannetpp
   workspace: thesis
-  experiment_name: train_stage1_scannetpp_20250712_135928
+  experiment_name: train_stage1_scannetpp_20250712_144548
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95

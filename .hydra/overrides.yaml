@@ -1,4 +1,4 @@
-- general.experiment_name=train_stage1_scannetpp_20250712_135928
+- general.experiment_name=train_stage1_scannetpp_20250712_144548
 - general.project_name=scannetpp
 - general.seed=1
 - data/datasets=scannetpp_stage1
