@@ -180,3 +180,4 @@ cython_debug/
 .idea/
 demo_test/TEST_SCENE*
 checkpoints/
+worker_state/*
