@@ -1,4 +1,4 @@
-- general.experiment_name=train_stage1_scannetpp_20250712_144548
+- general.experiment_name=train_stage1_scannetpp_20250713_181715
 - general.project_name=scannetpp
 - general.seed=1
 - data/datasets=scannetpp_stage1
@@ -9,8 +9,10 @@
 - data.num_workers=4
 - data.sam_folder=gt_mask
 - trainer.max_epochs=20
-- trainer.log_every_n_steps=500
+- trainer.log_every_n_steps=5
 - trainer.val_check_interval=2000
 - general.save_visualizations=False
 - general.gpus=2
 - model.num_queries=100
+- general.seed=23
+- data.train_dataloader.shuffle=False

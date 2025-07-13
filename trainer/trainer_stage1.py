@@ -1024,13 +1024,16 @@ class InstanceSegmentation(pl.LightningModule):
 
     def prepare_data(self):
         self.train_dataset = hydra.utils.instantiate(
-            self.config.data.train_dataset
+            self.config.data.train_dataset,
+            hydra_config=self.config
         )
         self.validation_dataset = hydra.utils.instantiate(
-            self.config.data.validation_dataset
+            self.config.data.validation_dataset,
+            hydra_config=self.config
         )
         self.test_dataset = hydra.utils.instantiate(
-            self.config.data.test_dataset
+            self.config.data.test_dataset,
+            hydra_config=self.config
         )
         self.labels_info = self.train_dataset.label_info
 

@@ -1,8 +1,8 @@
 #!/bin/bash
 export OMP_NUM_THREADS=3
-
 CURRENT_TIME=$(date +"%Y%m%d_%H%M%S")
 DATASET=${1:-"scannet"}
+shift  # Remove dataset argument, leaving additional config in $@
 
 if [ "$DATASET" == "scannetpp" ]; then
     echo "Training on ScanNet++ dataset"
@@ -28,8 +28,9 @@ CUDA_VISIBLE_DEVICES=0,1 python main_instance_segmentation_stage1.py \
     data.num_workers=4 \
     data.sam_folder="${SAM_FOLDER}" \
     trainer.max_epochs=20 \
-    trainer.log_every_n_steps=500 \
+    trainer.log_every_n_steps=5 \
     trainer.val_check_interval=2000 \
     general.save_visualizations=False \
     general.gpus=2 \
-    model.num_queries=100
+    model.num_queries=100 \
+    "$@"
