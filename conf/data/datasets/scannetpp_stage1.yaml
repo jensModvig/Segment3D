@@ -33,6 +33,7 @@ train_dataset:
   label_offset: 0
   scenes_to_exclude: ${data.scenes_to_exclude}
   max_frames: ${data.max_frames}
+  label_min_area: ${data.label_min_area}
 
 validation_dataset:
   _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
@@ -59,6 +60,7 @@ validation_dataset:
   label_offset: 0
   scenes_to_exclude: ${data.scenes_to_exclude}
   max_frames: ${data.max_frames}
+  label_min_area: ${data.label_min_area}
 
 test_dataset:
   _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
@@ -85,3 +87,4 @@ test_dataset:
   label_offset: 0
   scenes_to_exclude: ${data.scenes_to_exclude}
   max_frames: ${data.max_frames}
+  label_min_area: ${data.label_min_area}

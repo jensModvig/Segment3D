@@ -43,3 +43,4 @@ sam_folder: "sam"
 
 max_frames: null
 scenes_to_exclude: ""
+label_min_area: 100

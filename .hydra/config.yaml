@@ -1,7 +1,7 @@
 general:
   train_mode: true
   task: instance_segmentation
-  seed: 23
+  seed: null
   checkpoint: null
   backbone_checkpoint: null
   freeze_backbone: false
@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: scannetpp
   workspace: thesis
-  experiment_name: train_stage1_scannetpp_20250713_181715
+  experiment_name: train_stage1_scannetpp_20250716_130212
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -67,11 +67,12 @@ data:
   use_masks_th: 150
   use_masks_score: 0.6
   sam_folder: gt_mask
-  max_frames: 76320
+  max_frames: 99999
   scenes_to_exclude: 00dd871005,c4c04e6d6c
+  label_min_area: 0
   train_dataloader:
     _target_: torch.utils.data.DataLoader
-    shuffle: false
+    shuffle: true
     pin_memory: ${data.pin_memory}
     num_workers: ${data.num_workers}
     batch_size: ${data.batch_size}
@@ -121,6 +122,7 @@ data:
     label_offset: 0
     scenes_to_exclude: ${data.scenes_to_exclude}
     max_frames: ${data.max_frames}
+    label_min_area: ${data.label_min_area}
   validation_dataset:
     _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
     dataset_name: scannetpp
@@ -146,6 +148,7 @@ data:
     label_offset: 0
     scenes_to_exclude: ${data.scenes_to_exclude}
     max_frames: ${data.max_frames}
+    label_min_area: ${data.label_min_area}
   test_dataset:
     _target_: datasets.scannetpp_stage1.ScannetppStage1Dataset
     dataset_name: scannetpp
@@ -171,6 +174,7 @@ data:
     label_offset: 0
     scenes_to_exclude: ${data.scenes_to_exclude}
     max_frames: ${data.max_frames}
+    label_min_area: ${data.label_min_area}
   train_collation:
     _target_: datasets.utils.VoxelizeCollate
     ignore_label: ${data.ignore_label}
@@ -287,7 +291,7 @@ trainer:
   min_epochs: 1
   resume_from_checkpoint: null
   num_sanity_val_steps: 2
-  val_check_interval: 2000
+  val_check_interval: 100
   log_every_n_steps: 5
 callbacks:
 - _target_: pytorch_lightning.callbacks.ModelCheckpoint

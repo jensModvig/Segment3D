@@ -74,14 +74,19 @@ def sample_frames(max_frames_req, split, skip_scenes=None):
         f.writelines(f"{scene} {frame}\n" for scene, frame in selected)
     
     for scene_id, frame_id in tqdm(selected, desc=f"Saving pose and intrinsics."):
+        scene_poses_dir = poses_dir / scene_id
+        scene_poses_dir.mkdir(exist_ok=True)
+        intrinsic_pose_path = scene_poses_dir / f"{frame_id}.npz"
+        
+        if intrinsic_pose_path.exists():
+            continue
+        
         depth_path = scannetpp_processed_dir / 'data' / scene_id / 'iphone' / 'depth' / f"{frame_id}.png"
         if not depth_path.exists():
             raise FileNotFoundError(f"Depth frame missing: {depth_path}")
         
         pose, intrinsic = load_pose_and_intrinsic(scene_id, frame_id)
-        scene_poses_dir = poses_dir / scene_id
-        scene_poses_dir.mkdir(exist_ok=True)
-        np.savez_compressed(scene_poses_dir / f"{frame_id}.npz", pose=pose, intrinsics=intrinsic)
+        np.savez_compressed(intrinsic_pose_path, pose=pose, intrinsics=intrinsic)
 
 def main(max_frames, skip_scenes=None):
     for split in ['train', 'val']:

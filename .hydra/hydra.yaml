@@ -108,27 +108,26 @@ hydra:
     - hydra.run.dir="/work3/s173955/Segment3D"
     - hydra.job.name=train_ddp_process_1
     task:
-    - general.experiment_name=train_stage1_scannetpp_20250713_181715
+    - general.experiment_name=train_stage1_scannetpp_20250716_130212
     - general.project_name=scannetpp
-    - general.seed=1
     - data/datasets=scannetpp_stage1
     - data.scenes_to_exclude='00dd871005,c4c04e6d6c'
-    - data.max_frames=76320
+    - data.max_frames=200
     - optimizer.lr=0.0002
     - data.batch_size=8
     - data.num_workers=4
     - data.sam_folder=gt_mask
+    - data.label_min_area=0
     - trainer.max_epochs=20
     - trainer.log_every_n_steps=5
-    - trainer.val_check_interval=2000
+    - trainer.val_check_interval=100
     - general.save_visualizations=False
     - general.gpus=2
     - model.num_queries=100
-    - general.seed=23
-    - data.train_dataloader.shuffle=False
+    - data.max_frames=99999
   job:
     name: train_ddp_process_1
-    override_dirname: data.batch_size=8,data.max_frames=76320,data.num_workers=4,data.sam_folder=gt_mask,data.scenes_to_exclude='00dd871005,c4c04e6d6c',data.train_dataloader.shuffle=False,data/datasets=scannetpp_stage1,general.experiment_name=train_stage1_scannetpp_20250713_181715,general.gpus=2,general.project_name=scannetpp,general.save_visualizations=False,general.seed=1,general.seed=23,model.num_queries=100,optimizer.lr=0.0002,trainer.log_every_n_steps=5,trainer.max_epochs=20,trainer.val_check_interval=2000
+    override_dirname: data.batch_size=8,data.label_min_area=0,data.max_frames=200,data.max_frames=99999,data.num_workers=4,data.sam_folder=gt_mask,data.scenes_to_exclude='00dd871005,c4c04e6d6c',data/datasets=scannetpp_stage1,general.experiment_name=train_stage1_scannetpp_20250716_130212,general.gpus=2,general.project_name=scannetpp,general.save_visualizations=False,model.num_queries=100,optimizer.lr=0.0002,trainer.log_every_n_steps=5,trainer.max_epochs=20,trainer.val_check_interval=100
     id: ???
     num: ???
     config_name: config_base_instance_segmentation_stage1.yaml

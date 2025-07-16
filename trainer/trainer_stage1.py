@@ -130,7 +130,7 @@ class InstanceSegmentation(pl.LightningModule):
 
         if len(target) == 0:
             print("no targets")
-            return None
+            return torch.tensor(0.0, requires_grad=True)
 
         raw_coordinates = None
         if self.config.data.add_raw_coordinates:
@@ -157,7 +157,7 @@ class InstanceSegmentation(pl.LightningModule):
                 "only a single point gives nans in cross-attention"
                 == run_err.args[0]
             ):
-                return None
+                return torch.tensor(0.0, requires_grad=True)
             else:
                 raise run_err
 

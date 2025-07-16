@@ -28,12 +28,6 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 
-def write_worker_status(scene_id, frame_id, status, seed):
-    worker_id = os.getpid()
-    debug_dir = Path(f"./worker_state/{seed or 'unknown'}")
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    with open(debug_dir / f"{worker_id}_debug.txt", 'w') as f:
-        f.write(f"{status}:{scene_id}/{frame_id}:{time.time()}\n")
 
 
 class ScannetppStage1Dataset(Dataset):
@@ -88,6 +82,7 @@ class ScannetppStage1Dataset(Dataset):
         color_drop=0.0,
         max_frames = None,
         data: Optional[List[str]] = None,
+        label_min_area=0,
         hydra_config = None,
     ):
         assert task in [
@@ -101,6 +96,7 @@ class ScannetppStage1Dataset(Dataset):
         self.is_elastic_distortion = is_elastic_distortion
         self.color_drop = color_drop
         self.max_frames = max_frames
+        self.label_min_area = label_min_area
 
         if self.dataset_name == "scannetpp":
             self.color_map = {0: [0, 255, 0]}
@@ -335,288 +331,283 @@ class ScannetppStage1Dataset(Dataset):
         fname = self.data[idx]
         scene_id, frame_id = fname.split()
         
-        write_worker_status(scene_id, frame_id, "start", self.hydra_config.general.seed)
+        color_path = scannetpp_data / scene_id / 'iphone/rgb' / f'{frame_id}.jpg'
+        color_image = cv2.imread(str(color_path))
+        color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        color_image = cv2.resize(color_image, depth_dims)
+
+        depth_path = scannetpp_data / scene_id / 'iphone/depth' / f'{frame_id}.png'        
+        depth_image = cv2.imread(str(depth_path), -1)
+
+        pose_intrinsic_data = np.load(scannetpp_info_path / 'poses' / scene_id / f'{frame_id}.npz')
+        pose = pose_intrinsic_data['pose']
+        color_intrinsics = pose_intrinsic_data['intrinsics']
+
+        sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
+        with open(sam_path, 'rb') as image_file:
+            img = Image.open(image_file)
+            sam_groups = np.array(img, dtype=np.int16)
+            sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
+
+        mask = (depth_image != 0)
+        colors = np.reshape(color_image[mask], [-1,3])
+        sam_groups = sam_groups[mask]
+
+        depth_shift = 1000.0
+        x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
+        uv_depth = np.zeros((depth_image.shape[0], depth_image.shape[1], 3))
+        uv_depth[:,:,0] = x
+        uv_depth[:,:,1] = y
+        uv_depth[:,:,2] = depth_image/depth_shift
+        uv_depth = np.reshape(uv_depth, [-1,3])
+        uv_depth = uv_depth[np.where(uv_depth[:,2]!=0),:].squeeze()
         
-        try:
-            color_path = scannetpp_data / scene_id / 'iphone/rgb' / f'{frame_id}.jpg'
-            color_image = cv2.imread(str(color_path))
-            color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-            color_image = cv2.resize(color_image, depth_dims)
+        scales = np.array([depth_dims[0]/rgb_dims[0], depth_dims[1]/rgb_dims[1], 1])
+        depth_intrinsic = color_intrinsics * scales[:, None]
+        fx = depth_intrinsic[0,0]
+        fy = depth_intrinsic[1,1]
+        cx = depth_intrinsic[0,2]
+        cy = depth_intrinsic[1,2]
+        n = uv_depth.shape[0]
+        points = np.ones((n,4))
+        X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx
+        Y = (uv_depth[:,1]-cy)*uv_depth[:,2]/fy
+        points[:,0] = X
+        points[:,1] = Y
+        points[:,2] = uv_depth[:,2]
+        points_world = np.dot(points, np.transpose(pose))
+        sam_groups = self.num_to_natural(sam_groups)
 
-            depth_path = scannetpp_data / scene_id / 'iphone/depth' / f'{frame_id}.png'        
-            depth_image = cv2.imread(str(depth_path), -1)
-
-            pose_intrinsic_data = np.load(scannetpp_info_path / 'poses' / scene_id / f'{frame_id}.npz')
-            pose = pose_intrinsic_data['pose']
-            color_intrinsics = pose_intrinsic_data['intrinsics']
-
-            sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
-            with open(sam_path, 'rb') as image_file:
-                img = Image.open(image_file)
-                sam_groups = np.array(img, dtype=np.int16)
-                sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
-
-            mask = (depth_image != 0)
-            colors = np.reshape(color_image[mask], [-1,3])
-            sam_groups = sam_groups[mask]
-
-            depth_shift = 1000.0
-            x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
-            uv_depth = np.zeros((depth_image.shape[0], depth_image.shape[1], 3))
-            uv_depth[:,:,0] = x
-            uv_depth[:,:,1] = y
-            uv_depth[:,:,2] = depth_image/depth_shift
-            uv_depth = np.reshape(uv_depth, [-1,3])
-            uv_depth = uv_depth[np.where(uv_depth[:,2]!=0),:].squeeze()
-            
-            scales = np.array([depth_dims[0]/rgb_dims[0], depth_dims[1]/rgb_dims[1], 1])
-            depth_intrinsic = color_intrinsics * scales[:, None]
-            fx = depth_intrinsic[0,0]
-            fy = depth_intrinsic[1,1]
-            cx = depth_intrinsic[0,2]
-            cy = depth_intrinsic[1,2]
-            n = uv_depth.shape[0]
-            points = np.ones((n,4))
-            X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx
-            Y = (uv_depth[:,1]-cy)*uv_depth[:,2]/fy
-            points[:,0] = X
-            points[:,1] = Y
-            points[:,2] = uv_depth[:,2]
-            points_world = np.dot(points, np.transpose(pose))
-            sam_groups = self.num_to_natural(sam_groups)
-
+        if self.label_min_area != 0:
             counts = Counter(sam_groups)
             for num, count in counts.items():
-                if count < 100:
+                if count < self.label_min_area:
                     sam_groups[sam_groups == num] = -1
             sam_groups = self.num_to_natural(sam_groups)
+        if np.all(sam_groups == -1):
+            raise ValueError(f'Invalid frame {scene_id}/{frame_id} contains no groups after filtering.')
 
-            coordinates = points_world[:,:3]
-            color = colors
-            normals = np.ones_like(coordinates)
-            segments = np.ones(coordinates.shape[0])
-            labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
+        coordinates = points_world[:,:3]
+        color = colors
+        normals = np.ones_like(coordinates)
+        segments = np.ones(coordinates.shape[0])
+        labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
 
-            raw_coordinates = coordinates.copy()
-            raw_color = color
-            raw_normals = normals
+        raw_coordinates = coordinates.copy()
+        raw_color = color
+        raw_normals = normals
 
-            if not self.add_colors:
-                color = np.ones((len(color), 3))
+        if not self.add_colors:
+            color = np.ones((len(color), 3))
 
-            # volume and image augmentations for train
-            if "train" in self.mode or self.is_tta:
-                if self.cropping:
-                    new_idx = self.random_cuboid(
-                        coordinates,
-                        labels[:, 1],
-                        self._remap_from_zero(labels[:, 0].copy()),
+        # volume and image augmentations for train
+        if "train" in self.mode or self.is_tta:
+            if self.cropping:
+                new_idx = self.random_cuboid(
+                    coordinates,
+                    labels[:, 1],
+                    self._remap_from_zero(labels[:, 0].copy()),
+                )
+                coordinates = coordinates[new_idx]
+                color = color[new_idx]
+                labels = labels[new_idx]
+                segments = segments[new_idx]
+                raw_color = raw_color[new_idx]
+                raw_normals = raw_normals[new_idx]
+                normals = normals[new_idx]
+                points = points[new_idx]
+
+            coordinates -= coordinates.mean(0)
+            try:
+                coordinates += (
+                    np.random.uniform(coordinates.min(0), coordinates.max(0))
+                    / 2
+                )
+            except OverflowError as err:
+                print(coordinates)
+                print(coordinates.shape)
+                raise err
+
+            if self.instance_oversampling > 0.0:
+                (
+                    coordinates,
+                    color,
+                    normals,
+                    labels,
+                ) = self.augment_individual_instance(
+                    coordinates,
+                    color,
+                    normals,
+                    labels,
+                    self.instance_oversampling,
+                )
+
+            if self.flip_in_center:
+                coordinates = flip_in_center(coordinates)
+
+            for i in (0, 1):
+                if random() < 0.5:
+                    coord_max = np.max(points[:, i])
+                    coordinates[:, i] = coord_max - coordinates[:, i]
+
+            if random() < 0.95:
+                if self.is_elastic_distortion:
+                    for granularity, magnitude in ((0.2, 0.4), (0.8, 1.6)):
+                        coordinates = elastic_distortion(
+                            coordinates, granularity, magnitude
+                        )
+            aug = self.volume_augmentations(
+                points=coordinates,
+                normals=normals,
+                features=color,
+                labels=labels,
+            )
+            coordinates, color, normals, labels = (
+                aug["points"],
+                aug["features"],
+                aug["normals"],
+                aug["labels"],
+            )
+            pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
+            color = np.squeeze(
+                self.image_augmentations(image=pseudo_image)["image"]
+            )
+
+            if self.point_per_cut != 0:
+                number_of_cuts = int(len(coordinates) / self.point_per_cut)
+                for _ in range(number_of_cuts):
+                    size_of_cut = np.random.uniform(0.05, self.max_cut_region)
+                    # not wall, floor or empty
+                    point = choice(coordinates)
+                    x_min = point[0] - size_of_cut
+                    x_max = x_min + size_of_cut
+                    y_min = point[1] - size_of_cut
+                    y_max = y_min + size_of_cut
+                    z_min = point[2] - size_of_cut
+                    z_max = z_min + size_of_cut
+                    indexes = crop(
+                        coordinates, x_min, y_min, z_min, x_max, y_max, z_max
                     )
-                    coordinates = coordinates[new_idx]
-                    color = color[new_idx]
-                    labels = labels[new_idx]
-                    segments = segments[new_idx]
-                    raw_color = raw_color[new_idx]
-                    raw_normals = raw_normals[new_idx]
-                    normals = normals[new_idx]
-                    points = points[new_idx]
+                    coordinates, normals, color, labels = (
+                        coordinates[~indexes],
+                        normals[~indexes],
+                        color[~indexes],
+                        labels[~indexes],
+                    )
 
-                coordinates -= coordinates.mean(0)
-                try:
-                    coordinates += (
-                        np.random.uniform(coordinates.min(0), coordinates.max(0))
+            # if self.noise_rate > 0:
+            #     coordinates, color, normals, labels = random_points(
+            #         coordinates,
+            #         color,
+            #         normals,
+            #         labels,
+            #         self.noise_rate,
+            #         self.ignore_label,
+            #     )
+
+            if (self.resample_points > 0) or (self.noise_rate > 0):
+                coordinates, color, normals, labels = random_around_points(
+                    coordinates,
+                    color,
+                    normals,
+                    labels,
+                    self.resample_points,
+                    self.noise_rate,
+                    self.ignore_label,
+                )
+
+            if self.add_unlabeled_pc:
+                if random() < 0.8:
+                    new_points = np.load(
+                        self.other_database[
+                            np.random.randint(0, len(self.other_database) - 1)
+                        ]["filepath"]
+                    )
+                    (
+                        unlabeled_coords,
+                        unlabeled_color,
+                        unlabeled_normals,
+                        unlabeled_labels,
+                    ) = (
+                        new_points[:, :3],
+                        new_points[:, 3:6],
+                        new_points[:, 6:9],
+                        new_points[:, 9:],
+                    )
+                    unlabeled_coords -= unlabeled_coords.mean(0)
+                    unlabeled_coords += (
+                        np.random.uniform(
+                            unlabeled_coords.min(0), unlabeled_coords.max(0)
+                        )
                         / 2
                     )
-                except OverflowError as err:
-                    print(coordinates)
-                    print(coordinates.shape)
-                    raise err
 
-                if self.instance_oversampling > 0.0:
+                    aug = self.volume_augmentations(
+                        points=unlabeled_coords,
+                        normals=unlabeled_normals,
+                        features=unlabeled_color,
+                        labels=unlabeled_labels,
+                    )
                     (
-                        coordinates,
-                        color,
-                        normals,
-                        labels,
-                    ) = self.augment_individual_instance(
-                        coordinates,
-                        color,
-                        normals,
-                        labels,
-                        self.instance_oversampling,
+                        unlabeled_coords,
+                        unlabeled_color,
+                        unlabeled_normals,
+                        unlabeled_labels,
+                    ) = (
+                        aug["points"],
+                        aug["features"],
+                        aug["normals"],
+                        aug["labels"],
+                    )
+                    pseudo_image = unlabeled_color.astype(np.uint8)[
+                        np.newaxis, :, :
+                    ]
+                    unlabeled_color = np.squeeze(
+                        self.image_augmentations(image=pseudo_image)["image"]
                     )
 
-                if self.flip_in_center:
-                    coordinates = flip_in_center(coordinates)
-
-                for i in (0, 1):
-                    if random() < 0.5:
-                        coord_max = np.max(points[:, i])
-                        coordinates[:, i] = coord_max - coordinates[:, i]
-
-                if random() < 0.95:
-                    if self.is_elastic_distortion:
-                        for granularity, magnitude in ((0.2, 0.4), (0.8, 1.6)):
-                            coordinates = elastic_distortion(
-                                coordinates, granularity, magnitude
-                            )
-                aug = self.volume_augmentations(
-                    points=coordinates,
-                    normals=normals,
-                    features=color,
-                    labels=labels,
-                )
-                coordinates, color, normals, labels = (
-                    aug["points"],
-                    aug["features"],
-                    aug["normals"],
-                    aug["labels"],
-                )
-                pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
-                color = np.squeeze(
-                    self.image_augmentations(image=pseudo_image)["image"]
-                )
-
-                if self.point_per_cut != 0:
-                    number_of_cuts = int(len(coordinates) / self.point_per_cut)
-                    for _ in range(number_of_cuts):
-                        size_of_cut = np.random.uniform(0.05, self.max_cut_region)
-                        # not wall, floor or empty
-                        point = choice(coordinates)
-                        x_min = point[0] - size_of_cut
-                        x_max = x_min + size_of_cut
-                        y_min = point[1] - size_of_cut
-                        y_max = y_min + size_of_cut
-                        z_min = point[2] - size_of_cut
-                        z_max = z_min + size_of_cut
-                        indexes = crop(
-                            coordinates, x_min, y_min, z_min, x_max, y_max, z_max
+                    coordinates = np.concatenate(
+                        (coordinates, unlabeled_coords)
+                    )
+                    color = np.concatenate((color, unlabeled_color))
+                    normals = np.concatenate((normals, unlabeled_normals))
+                    labels = np.concatenate(
+                        (
+                            labels,
+                            np.full_like(unlabeled_labels, self.ignore_label),
                         )
-                        coordinates, normals, color, labels = (
-                            coordinates[~indexes],
-                            normals[~indexes],
-                            color[~indexes],
-                            labels[~indexes],
-                        )
-
-                # if self.noise_rate > 0:
-                #     coordinates, color, normals, labels = random_points(
-                #         coordinates,
-                #         color,
-                #         normals,
-                #         labels,
-                #         self.noise_rate,
-                #         self.ignore_label,
-                #     )
-
-                if (self.resample_points > 0) or (self.noise_rate > 0):
-                    coordinates, color, normals, labels = random_around_points(
-                        coordinates,
-                        color,
-                        normals,
-                        labels,
-                        self.resample_points,
-                        self.noise_rate,
-                        self.ignore_label,
                     )
 
-                if self.add_unlabeled_pc:
-                    if random() < 0.8:
-                        new_points = np.load(
-                            self.other_database[
-                                np.random.randint(0, len(self.other_database) - 1)
-                            ]["filepath"]
-                        )
-                        (
-                            unlabeled_coords,
-                            unlabeled_color,
-                            unlabeled_normals,
-                            unlabeled_labels,
-                        ) = (
-                            new_points[:, :3],
-                            new_points[:, 3:6],
-                            new_points[:, 6:9],
-                            new_points[:, 9:],
-                        )
-                        unlabeled_coords -= unlabeled_coords.mean(0)
-                        unlabeled_coords += (
-                            np.random.uniform(
-                                unlabeled_coords.min(0), unlabeled_coords.max(0)
-                            )
-                            / 2
-                        )
+            if random() < self.color_drop:
+                color[:] = 255
 
-                        aug = self.volume_augmentations(
-                            points=unlabeled_coords,
-                            normals=unlabeled_normals,
-                            features=unlabeled_color,
-                            labels=unlabeled_labels,
-                        )
-                        (
-                            unlabeled_coords,
-                            unlabeled_color,
-                            unlabeled_normals,
-                            unlabeled_labels,
-                        ) = (
-                            aug["points"],
-                            aug["features"],
-                            aug["normals"],
-                            aug["labels"],
-                        )
-                        pseudo_image = unlabeled_color.astype(np.uint8)[
-                            np.newaxis, :, :
-                        ]
-                        unlabeled_color = np.squeeze(
-                            self.image_augmentations(image=pseudo_image)["image"]
-                        )
+        # normalize color information
+        pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
+        color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
+        # prepare labels and map from 0 to 20(40)
+        labels = labels.astype(np.int32)
+        labels = np.hstack((labels, segments[..., None].astype(np.int32)))
 
-                        coordinates = np.concatenate(
-                            (coordinates, unlabeled_coords)
-                        )
-                        color = np.concatenate((color, unlabeled_color))
-                        normals = np.concatenate((normals, unlabeled_normals))
-                        labels = np.concatenate(
-                            (
-                                labels,
-                                np.full_like(unlabeled_labels, self.ignore_label),
-                            )
-                        )
+        features = color
+        if self.add_normals:
+            features = np.hstack((features, normals))
+        if self.add_raw_coordinates:
+            if len(features.shape) == 1:
+                features = np.hstack((features[None, ...], coordinates))
+            else:
+                features = np.hstack((features, coordinates))
+        
+        return (
+            coordinates,
+            features,
+            labels,
+            f'{scene_id}/{frame_id}',
+            raw_color,
+            raw_normals,
+            raw_coordinates,
+            idx,
+        )
 
-                if random() < self.color_drop:
-                    color[:] = 255
-
-            # normalize color information
-            pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
-            color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
-            # prepare labels and map from 0 to 20(40)
-            labels = labels.astype(np.int32)
-            labels = np.hstack((labels, segments[..., None].astype(np.int32)))
-
-            features = color
-            if self.add_normals:
-                features = np.hstack((features, normals))
-            if self.add_raw_coordinates:
-                if len(features.shape) == 1:
-                    features = np.hstack((features[None, ...], coordinates))
-                else:
-                    features = np.hstack((features, coordinates))
-
-            write_worker_status(scene_id, frame_id, "done", self.hydra_config.general.seed)
-            
-            return (
-                coordinates,
-                features,
-                labels,
-                f'{scene_id}/{frame_id}',
-                raw_color,
-                raw_normals,
-                raw_coordinates,
-                idx,
-            )
-            
-        except Exception as e:
-            write_worker_status(scene_id, frame_id, f"error:{str(e)}", self.hydra_config.general.seed)
-            raise
 
     @property
     def data(self):

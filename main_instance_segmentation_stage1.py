@@ -16,6 +16,7 @@ from utils.utils import (
 from pytorch_lightning import Trainer, seed_everything
 import torch
 from detectron2.utils.comm import is_main_process
+from gpu_memory_manager import GPUMemoryManager
 
 def get_parameters(cfg: DictConfig):
     logger = logging.getLogger(__name__)
@@ -88,7 +89,12 @@ def train(cfg: DictConfig):
         **cfg.trainer,
         limit_val_batches=100,
     )
-    runner.fit(model)
+    
+    with GPUMemoryManager(required_gb_per_gpu=12.0) as (ready_gpus, reserved_tensors):
+        if ready_gpus is None:
+            print("Required GPU memory not available, exiting")
+            return
+        runner.fit(model)
 
 
 @hydra.main(
