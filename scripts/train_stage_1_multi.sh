@@ -29,7 +29,7 @@ python main_instance_segmentation_stage1.py \
     data.label_min_area=0 \
     trainer.max_epochs=20 \
     trainer.log_every_n_steps=5 \
-    trainer.val_check_interval=100 \
+    trainer.val_check_interval=2000 \
     general.save_visualizations=False \
     general.gpus=2 \
     model.num_queries=100 \
