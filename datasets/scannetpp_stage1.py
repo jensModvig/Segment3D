@@ -419,10 +419,7 @@ class ScannetppStage1Dataset(Dataset):
 
             coordinates -= coordinates.mean(0)
             try:
-                coordinates += (
-                    np.random.uniform(coordinates.min(0), coordinates.max(0))
-                    / 2
-                )
+                coordinates += (np.random.uniform(coordinates.min(0), coordinates.max(0)) / 2)
             except OverflowError as err:
                 print(coordinates)
                 print(coordinates.shape)
