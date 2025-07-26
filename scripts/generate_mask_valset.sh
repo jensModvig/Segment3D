@@ -9,7 +9,7 @@ CURR_QUERY=150
 CURRENT_TIME=$(date +"%Y%m%d_%H%M%S")
 
 
-CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation_generate_mask_valset.py \
+python main_instance_segmentation_generate_mask_valset.py \
     general.experiment_name="mask_generation_${CURRENT_TIME}" \
     general.train_mode=false \
     general.eval_on_segments=false \
@@ -22,3 +22,4 @@ CUDA_VISIBLE_DEVICES=0 python main_instance_segmentation_generate_mask_valset.py
     general.gpus=1 \
     general.save_visualizations=False \
     general.checkpoint="PATH_TO_STAGE1_CHECKPOINT" \
+    "$@"
