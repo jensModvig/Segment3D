@@ -38,7 +38,10 @@ class Stage1Dataset(Dataset):
         label_db_filepath: Optional[
             str
         ] = "configs/scannetpp_preprocessing/label_database.yaml",
-        sam_folder: Optional[str] = "sam",
+        sam_folder: Optional[str] = "not_set",
+        color_folder: Optional[str] = "not_set",
+        depth_folder: Optional[str] = "not_set",
+        intrinsic_folder: Optional[str] = "not_set",
         scenes_to_exclude: str = "",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
@@ -118,6 +121,9 @@ class Stage1Dataset(Dataset):
         self.is_tta = is_tta
         self.on_crops = on_crops
         self.sam_folder = sam_folder
+        self.color_folder = color_folder  # Store the new parameters
+        self.depth_folder = depth_folder
+        self.intrinsic_folder = intrinsic_folder
 
         # Handle scenes to exclude
         self.excluded_scenes = set()
@@ -207,8 +213,12 @@ class Stage1Dataset(Dataset):
             raise ValueError('cache_data was apparently important')
     
     @staticmethod  
-    def load_specific_frame(scene_id, frame_id):
-        dataset = ScannetppStage1Dataset(
+    def load_specific_frame(scene_id, frame_id,
+                            sam_folder='gt_mask',
+                            color_folder='iphone/rgb',
+                            depth_folder='iphone/depth',
+                            intrinsic_folder='not_set'):
+        dataset = Stage1Dataset(
             mode="validation",
             point_per_cut=0,
             cropping=False,
@@ -221,7 +231,10 @@ class Stage1Dataset(Dataset):
             flip_in_center=False,
             is_elastic_distortion=False,
             color_drop=0.0,
-            sam_folder='gt_mask',
+            sam_folder=sam_folder,
+            color_folder=color_folder,
+            depth_folder=depth_folder,
+            intrinsic_folder=intrinsic_folder,
             data=[f"{scene_id} {frame_id}"],
             hydra_config=None
         )
@@ -331,17 +344,17 @@ class Stage1Dataset(Dataset):
         fname = self.data[idx]
         scene_id, frame_id = fname.split()
         
-        color_path = scannetpp_data / scene_id / 'iphone/rgb' / f'{frame_id}.jpg'
+        # Use configurable folders instead of hardcoded paths
+        color_path = scannetpp_data / scene_id / self.color_folder / f'{frame_id}.jpg'
         color_image = cv2.imread(str(color_path))
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         color_image = cv2.resize(color_image, depth_dims)
 
-        depth_path = scannetpp_data / scene_id / 'iphone/depth' / f'{frame_id}.png'        
+        depth_path = scannetpp_data / scene_id / self.depth_folder / f'{frame_id}.png'        
         depth_image = cv2.imread(str(depth_path), -1)
 
-        pose_intrinsic_data = np.load(scannetpp_info_path / 'poses' / scene_id / f'{frame_id}.npz')
-        pose = pose_intrinsic_data['pose']
-        color_intrinsics = pose_intrinsic_data['intrinsics']
+        intrinsic_path = scannetpp_data / scene_id / self.intrinsic_folder / f'{frame_id}.npy'  
+        color_intrinsics = np.load(intrinsic_path)
 
         sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
         with open(sam_path, 'rb') as image_file:
@@ -375,7 +388,9 @@ class Stage1Dataset(Dataset):
         points[:,0] = X
         points[:,1] = Y
         points[:,2] = uv_depth[:,2]
-        points_world = np.dot(points, np.transpose(pose))
+        # If we had a pose we could add it here
+        # points_world = np.dot(points, np.transpose(pose))
+        points_world = points
         sam_groups = self.num_to_natural(sam_groups)
 
         if self.label_min_area != 0:

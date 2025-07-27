@@ -1,6 +1,6 @@
-- general.experiment_name=train_stage1_scannetpp_20250726_050127
-- general.project_name=scannetpp
-- data/datasets=scannetpp_stage1
+- general.experiment_name=train_stage1_stage1_20250727_152041
+- general.project_name=stage1
+- data/datasets=stage1
 - data.scenes_to_exclude='00dd871005,c4c04e6d6c'
 - data.max_frames=76320
 - optimizer.lr=0.0002
@@ -15,4 +15,8 @@
 - general.gpus=2
 - model.num_queries=100
 - optimizer.lr=0.0002
-- data.max_frames=38160
+- data.max_frames=76320
+- data.sam_folder=gt_mask
+- data.color_folder=iphone/rgb
+- data.depth_folder=depth_pro/depth_map_256x192
+- data.intrinsic_folder=depth_pro/intrinsics_256x192

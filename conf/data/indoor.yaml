@@ -40,6 +40,9 @@ generate_masks_path: "data/processed/scannet_3d_masks"
 use_masks_th: 150
 use_masks_score: 0.6
 sam_folder: "sam"
+color_folder: "not set"
+depth_folder: "not set"
+intrinsic_folder: "not set"
 
 max_frames: null
 scenes_to_exclude: ""
