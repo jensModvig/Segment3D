@@ -25,6 +25,7 @@ import colorsys
 from typing import List, Tuple
 import functools
 from detectron2.utils.comm import is_main_process
+from .base_trainer_utils import TrainerUtilsMixin
 
 @functools.lru_cache(20)
 def get_evenly_distributed_colors(
@@ -52,7 +53,7 @@ class RegularCheckpointing(pl.Callback):
         print("Checkpoint created")
 
 
-class InstanceSegmentation(pl.LightningModule):
+class InstanceSegmentation(pl.LightningModule, TrainerUtilsMixin):
     def __init__(self, config):
         super().__init__()
 
@@ -109,6 +110,7 @@ class InstanceSegmentation(pl.LightningModule):
         self.labels_info = dict()
 
         self.prepare_data()
+        self._filter_first = True
 
     def forward(
         self, x, point2segment=None, raw_coordinates=None, is_eval=False
@@ -539,62 +541,6 @@ class InstanceSegmentation(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         return self.eval_step(batch, batch_idx)
-
-    def get_full_res_mask(
-        self, mask, inverse_map, point2segment_full, is_heatmap=False
-    ):
-        mask = mask.detach().cpu()[inverse_map]  # full res
-
-        if self.eval_on_segments and is_heatmap == False:
-            mask = scatter_mean(
-                mask, point2segment_full, dim=0
-            )  # full res segments
-            mask = (mask > 0.5).float()
-            mask = mask.detach().cpu()[
-                point2segment_full.cpu()
-            ]  # full res points
-
-        return mask
-
-
-    def get_mask_and_scores(
-        self, mask_cls, mask_pred, num_queries=100, num_classes=18, device=None
-    ):
-        if device is None:
-            device = self.device
-        labels = (
-            torch.arange(num_classes, device=device)
-            .unsqueeze(0)
-            .repeat(num_queries, 1)
-            .flatten(0, 1)
-        )
-        
-        result_pred_mask = (mask_pred > 0).float()
-        # Filter out columns where no predictions were made
-        valid_cols = result_pred_mask.sum(0) > 0
-
-        labels = labels[valid_cols]
-        mask_pred = mask_pred[:, valid_cols]
-        mask_cls = mask_cls[valid_cols]
-        result_pred_mask = result_pred_mask[:, valid_cols]
-
-        heatmap = mask_pred.float().sigmoid()
-        mask_scores_per_image = (heatmap * result_pred_mask).sum(0) / (
-            result_pred_mask.sum(0) + 1e-6
-        )
-        score = mask_cls.flatten(0, 1) * mask_scores_per_image
-
-        if self.config.general.topk_per_image == -1:
-            topk = num_queries
-        else:
-            topk = int(self.config.general.topk_per_image * num_queries)
-        score, topk_indices = score.topk(topk, sorted=True)
-
-        classes = labels[topk_indices]
-        result_pred_mask = result_pred_mask[:, topk_indices]
-        heatmap = heatmap[:, topk_indices]
-
-        return score, result_pred_mask, classes, heatmap
 
     def eval_instance_step(
         self,
