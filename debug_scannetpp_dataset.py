@@ -5,6 +5,7 @@ import colorsys
 from pathlib import Path
 from datasets.scannet_stage1 import SemanticSegmentationDataset
 from datasets.scannetpp_stage1 import ScannetppStage1Dataset
+from datasets.stage1 import Stage1Dataset
 
 
 def generate_colors(n_labels):
@@ -55,13 +56,19 @@ def main():
     output_dir.mkdir(exist_ok=True)
     
     datasets = [
-        ("scannet", SemanticSegmentationDataset(
-            mode="train",
-            max_frames=10,
-            point_per_cut=0,
-            data_dir="data/processed"
-        )),
-        ("scannetpp", ScannetppStage1Dataset(
+        # ("scannet", SemanticSegmentationDataset(
+        #     mode="train",
+        #     max_frames=10,
+        #     point_per_cut=0,
+        #     data_dir="data/processed"
+        # )),
+        # ("scannetpp", ScannetppStage1Dataset(
+        #     mode="train",
+        #     max_frames=10,
+        #     point_per_cut=0,
+        #     scenes_to_exclude="dfac5b38df,00dd871005,c4c04e6d6c"
+        # )),
+        ("stage1", Stage1Dataset(
             mode="train",
             max_frames=10,
             point_per_cut=0,

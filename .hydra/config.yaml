@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: stage1
   workspace: thesis
-  experiment_name: train_stage1_stage1_20250727_152041
+  experiment_name: train_stage1_stage1_20250729_120556
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -68,8 +68,8 @@ data:
   use_masks_score: 0.6
   sam_folder: gt_mask
   color_folder: iphone/rgb
-  depth_folder: depth_pro/depth_map_256x192
-  intrinsic_folder: depth_pro/intrinsics_256x192
+  depth_folder: depth_pro/depth_map_fpx_256x192
+  intrinsic_folder: depth_pro/intrinsics_fpx_256x192
   max_frames: 76320
   scenes_to_exclude: 00dd871005,c4c04e6d6c
   label_min_area: 0

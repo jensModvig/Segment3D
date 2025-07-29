@@ -1,6 +1,7 @@
 import argparse
 import json
 import colorsys
+import shutil
 import numpy as np
 import open3d as o3d
 import torch
@@ -9,6 +10,7 @@ from hydra.experimental import initialize, compose
 from demo_utils import get_model, prepare_data
 from datasets.scannetpp_stage1 import ScannetppStage1Dataset
 from datasets.scannetpp import SemanticSegmentationDataset
+from datasets.stage1 import Stage1Dataset
 
 try:
     from thes.paths import scannetpp_raw_dir
@@ -24,41 +26,27 @@ def save_pcd(coords, colors, path):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(coords)
     pcd.colors = o3d.utility.Vector3dVector(np.clip(colors / 255.0, 0, 1))
-    if not o3d.io.write_point_cloud(str(path), pcd):
-        raise RuntimeError(f"Failed to save {path}")
+    o3d.io.write_point_cloud(str(path), pcd)
 
 
-def load_scene_raw(scene_id):
-    raw_mesh_path = scannetpp_raw_dir / "data" / scene_id / "scans" / "mesh_aligned_0.05.ply"
-    if not raw_mesh_path.exists():
-        raise FileNotFoundError(f"Raw mesh not found: {raw_mesh_path}")
-    
-    mesh = o3d.io.read_triangle_mesh(str(raw_mesh_path))
-    if len(mesh.vertices) == 0:
-        raise ValueError(f"Empty mesh: {raw_mesh_path}")
-    
+def load_scene_raw(scene_id, frame_id=None):
+    mesh_path = scannetpp_raw_dir / "data" / scene_id / "scans" / "mesh_aligned_0.05.ply"
+    mesh = o3d.io.read_triangle_mesh(str(mesh_path))
     coords = np.asarray(mesh.vertices)
-    colors = np.asarray(mesh.vertex_colors) * 255
-    if len(colors) == 0:
-        colors = np.full((len(coords), 3), 255, dtype=np.uint8)
+    colors = np.asarray(mesh.vertex_colors) * 255 if len(mesh.vertex_colors) else np.full((len(coords), 3), 255)
     
-    segments_path = raw_mesh_path.parent / "segments.json"
-    segments_anno_path = raw_mesh_path.parent / "segments_anno.json"
+    segments_path = mesh_path.parent / "segments.json"
+    segments_anno_path = mesh_path.parent / "segments_anno.json"
     
     if segments_path.exists() and segments_anno_path.exists():
-        with open(segments_path, 'r') as f:
-            segments_data = json.load(f)
-        vertex_to_segment = np.array(segments_data["segIndices"])
-        
-        with open(segments_anno_path, 'r') as f:
+        with open(segments_path) as f:
+            vertex_to_segment = np.array(json.load(f)["segIndices"])
+        with open(segments_anno_path) as f:
             annotations = json.load(f)
         
-        max_segment_id = vertex_to_segment.max() + 1
-        segment_to_instance = np.full(max_segment_id, -1, dtype=np.int32)
-        
+        segment_to_instance = np.full(vertex_to_segment.max() + 1, -1, dtype=np.int32)
         for instance_id, anno in enumerate(annotations["segGroups"]):
-            segment_ids = np.array(anno["segments"])
-            segment_to_instance[segment_ids] = instance_id
+            segment_to_instance[np.array(anno["segments"])] = instance_id
         
         vertex_to_instance = segment_to_instance[vertex_to_segment]
         labels = np.column_stack([np.zeros_like(vertex_to_instance), vertex_to_instance])
@@ -110,27 +98,35 @@ def infer(model, coords, colors, cfg, device):
     return scores.numpy(), (masks_full.T > 0).numpy()
 
 
-def process_data(coords, colors, labels, model, cfg, device, output_dir, prefix):
+def process_dataset(name, loader, scene_id, frame_id, model, cfg, device, output_dir):
+    coords, colors, labels = loader(scene_id, frame_id)
+    prefix = f"{scene_id}_{frame_id}_{name}" if frame_id else f"{scene_id}_{name}"
+    
     save_pcd(coords, colors, output_dir / f"{prefix}_rgb.pcd")
     
+    gt_count = 0
     if labels is not None:
-        unique_labels = np.unique(labels[labels >= 0])
+        instance_labels = labels[:, 1] if labels.ndim > 1 else labels
+        unique_labels = np.unique(instance_labels[instance_labels >= 0])
         if len(unique_labels) > 0:
+            gt_count = len(unique_labels)
             label_colors = np.zeros_like(coords)
-            palette = generate_colors(len(unique_labels))
+            palette = generate_colors(gt_count)
             for i, label in enumerate(unique_labels):
-                label_colors[labels == label] = palette[i]
+                label_colors[instance_labels == label] = palette[i]
             save_pcd(coords, label_colors, output_dir / f"{prefix}_gt.pcd")
     
     scores, masks = infer(model, coords, colors, cfg, device)
-    if len(scores) > 0:
+    pred_count = len(scores)
+    if pred_count > 0:
         pred_colors = np.zeros_like(coords)
-        palette = generate_colors(len(scores))
+        palette = generate_colors(pred_count)
         for i, mask in enumerate(masks):
             pred_colors[mask] = palette[i]
         save_pcd(coords, pred_colors, output_dir / f"{prefix}_pred.pcd")
     
-    return len(unique_labels) if labels is not None else 0, len(scores)
+    print(f"{name}: {gt_count} GT, {pred_count} pred")
+    return True
 
 
 def main():
@@ -142,7 +138,9 @@ def main():
     args = parser.parse_args()
     
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(exist_ok=True)
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir()
     
     with initialize(config_path="conf"):
         cfg = compose(config_name="config_base_instance_segmentation.yaml")
@@ -151,31 +149,49 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(cfg).eval().to(device)
     
-    # Process frame
-    coords, colors, labels = ScannetppStage1Dataset.load_specific_frame(args.scene_id, args.frame_id)
-    gt_count, pred_count = process_data(
-        coords, colors, labels[:, 1], model, cfg, device, output_dir, 
-        f"{args.scene_id}_{args.frame_id}_frame"
-    )
-    print(f"Frame: {gt_count} GT instances, {pred_count} predictions")
+    datasets = [
+        ("scannetpp_gt_stage1", lambda s, f: ScannetppStage1Dataset.load_specific_frame(s, f)),
+        ("stage1_gt_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
+            scene_id=s,
+            frame_id=f,
+            sam_folder='gt_mask',
+            color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpx_256x192',
+            intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
+        )),
+        ("stage1_gt_depth640", lambda s, f: Stage1Dataset.load_specific_frame(
+            scene_id=s,
+            frame_id=f,
+            sam_folder='gt_mask',
+            color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpx_640x480',
+            intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
+        )),
+        ("stage1_sam_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
+            scene_id=s,
+            frame_id=f,
+            sam_folder='sam',
+            color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpx_256x192',
+            intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
+        )),
+        ("stage1_sam_depth640", lambda s, f: Stage1Dataset.load_specific_frame(
+            scene_id=s,
+            frame_id=f,
+            sam_folder='sam',
+            color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpx_640x480',
+            intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
+        )),
+        # ("preprocessed", lambda s, f: SemanticSegmentationDataset.load_specific_scene(s)),
+        # ("raw", load_scene_raw),
+    ]
     
-    # Process preprocessed scene
-    coords, colors, labels = SemanticSegmentationDataset.load_specific_scene(args.scene_id)
-    gt_count, pred_count = process_data(
-        coords, colors, labels[:, 1], model, cfg, device, output_dir,
-        f"{args.scene_id}_preprocessed"
-    )
-    print(f"Preprocessed scene: {gt_count} GT instances, {pred_count} predictions")
+    success_count = sum(process_dataset(name, loader, args.scene_id, args.frame_id, 
+                                      model, cfg, device, output_dir) 
+                       for name, loader in datasets)
     
-    # Process raw scene
-    coords, colors, labels = load_scene_raw(args.scene_id)
-    gt_count, pred_count = process_data(
-        coords, colors, labels[:, 1], model, cfg, device, output_dir,
-        f"{args.scene_id}_raw"
-    )
-    print(f"Raw scene: {gt_count} GT instances, {pred_count} predictions")
-    
-    print(f"Results saved to {output_dir}")
+    print(f"Processed {success_count}/{len(datasets)} datasets → {output_dir}")
 
 
 if __name__ == "__main__":
