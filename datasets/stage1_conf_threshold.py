@@ -342,8 +342,7 @@ class Stage1Dataset(Dataset):
         confidence_image = depth_data['confidence']
         depth_dims = depth_image.shape[:2][::-1]
         
-        confidence_mask = (confidence_image.astype(np.float32) / 65535.0) >= 0.5
-        depth_image[~confidence_mask] = 0
+        confidence = confidence_image.astype(np.float32) / 65535.0
         
         color_path = scannetpp_data / scene_id / self.color_folder / f'{frame_id}.jpg'
         color_image = cv2.imread(str(color_path))
@@ -360,9 +359,13 @@ class Stage1Dataset(Dataset):
             sam_groups = np.array(img, dtype=np.int16)
             sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
 
-        mask = (depth_image != 0)
-        colors = np.reshape(color_image[mask], [-1,3])
-        sam_groups = sam_groups[mask]
+        no_depth_mask = (depth_image != 0)
+        colors = np.reshape(color_image[no_depth_mask], [-1,3])
+        sam_groups = sam_groups[no_depth_mask]
+        confidence = confidence[no_depth_mask]
+        
+        # label low confidence as noise/unique label id
+        sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
 
         depth_shift = 1000.0
         x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
@@ -425,6 +428,7 @@ class Stage1Dataset(Dataset):
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
                 points = points[new_idx]
+                confidence = confidence[new_idx]
 
             coordinates -= coordinates.mean(0)
             try:
@@ -494,12 +498,11 @@ class Stage1Dataset(Dataset):
                     indexes = crop(
                         coordinates, x_min, y_min, z_min, x_max, y_max, z_max
                     )
-                    coordinates, normals, color, labels = (
-                        coordinates[~indexes],
-                        normals[~indexes],
-                        color[~indexes],
-                        labels[~indexes],
-                    )
+                    coordinates = coordinates[~indexes]
+                    normals = normals[~indexes]
+                    color = color[~indexes]
+                    labels = labels[~indexes]
+                    confidence = confidence[~indexes]
 
             # if self.noise_rate > 0:
             #     coordinates, color, normals, labels = random_points(
@@ -583,6 +586,7 @@ class Stage1Dataset(Dataset):
                             np.full_like(unlabeled_labels, self.ignore_label),
                         )
                     )
+                    confidence = np.concatenate((confidence, np.zeros(len(unlabeled_coords))))
 
             if random() < self.color_drop:
                 color[:] = 255
@@ -607,13 +611,14 @@ class Stage1Dataset(Dataset):
             coordinates,
             features,
             labels,
+            confidence,
             f'{scene_id}/{frame_id}',
             raw_color,
             raw_normals,
             raw_coordinates,
             idx,
         )
-
+        
 
     @property
     def data(self):

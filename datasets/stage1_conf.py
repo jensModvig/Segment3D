@@ -336,10 +336,14 @@ class Stage1Dataset(Dataset):
 
         fname = self.data[idx]
         scene_id, frame_id = fname.split()
-        
-        depth_path = scannetpp_data / scene_id / self.depth_folder / f'{frame_id}.png'        
-        depth_image = cv2.imread(str(depth_path), -1)
+        depth_npz_path = scannetpp_data / scene_id / self.depth_folder / f'{frame_id}.npz'
+        depth_data = np.load(str(depth_npz_path))
+        depth_image = depth_data['depth']
+        confidence_image = depth_data['confidence']
         depth_dims = depth_image.shape[:2][::-1]
+        
+        confidence_mask = (confidence_image.astype(np.float32) / 65535.0) >= 0.5
+        depth_image[~confidence_mask] = 0
         
         color_path = scannetpp_data / scene_id / self.color_folder / f'{frame_id}.jpg'
         color_image = cv2.imread(str(color_path))

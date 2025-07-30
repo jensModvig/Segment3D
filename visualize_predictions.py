@@ -10,7 +10,8 @@ from hydra.experimental import initialize, compose
 from demo_utils import get_model, prepare_data
 from datasets.scannetpp_stage1 import ScannetppStage1Dataset
 from datasets.scannetpp import SemanticSegmentationDataset
-from datasets.stage1 import Stage1Dataset
+from datasets.stage1 import Stage1Dataset as Stage1default
+from datasets.stage1_conf import Stage1Dataset as Stage1conf
 
 try:
     from thes.paths import scannetpp_raw_dir
@@ -151,31 +152,15 @@ def main():
     
     datasets = [
         ("scannetpp_gt_stage1", lambda s, f: ScannetppStage1Dataset.load_specific_frame(s, f)),
-        ("stage1_gt_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
-            scene_id=s,
-            frame_id=f,
-            sam_folder='gt_mask',
-            color_folder='iphone/rgb',
-            depth_folder='depth_pro/depth_map_fpx_256x192',
-            intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
-        )),
-        ("stage1_gt_depth640", lambda s, f: Stage1Dataset.load_specific_frame(
-            scene_id=s,
-            frame_id=f,
-            sam_folder='gt_mask',
-            color_folder='iphone/rgb',
-            depth_folder='depth_pro/depth_map_fpx_640x480',
-            intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
-        )),
-        ("stage1_sam_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
-            scene_id=s,
-            frame_id=f,
-            sam_folder='sam',
-            color_folder='iphone/rgb',
-            depth_folder='depth_pro/depth_map_fpx_256x192',
-            intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
-        )),
-        ("stage1_sam_depth640", lambda s, f: Stage1Dataset.load_specific_frame(
+        # ("stage1_gt_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
+        #     scene_id=s,
+        #     frame_id=f,
+        #     sam_folder='gt_mask',
+        #     color_folder='iphone/rgb',
+        #     depth_folder='depth_pro/depth_map_fpx_256x192',
+        #     intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
+        # )),
+        ("stage1_gt_depth640", lambda s, f: Stage1default.load_specific_frame(
             scene_id=s,
             frame_id=f,
             sam_folder='sam',
@@ -183,6 +168,30 @@ def main():
             depth_folder='depth_pro/depth_map_fpx_640x480',
             intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
         )),
+        ("stage1_gt_depth640_conf", lambda s, f: Stage1conf.load_specific_frame(
+            scene_id=s,
+            frame_id=f,
+            sam_folder='sam',
+            color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpx_640x480',
+            intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
+        )),
+        # ("stage1_sam_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
+        #     scene_id=s,
+        #     frame_id=f,
+        #     sam_folder='sam',
+        #     color_folder='iphone/rgb',
+        #     depth_folder='depth_pro/depth_map_fpx_256x192',
+        #     intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
+        # )),
+        # ("stage1_sam_depth640", lambda s, f: Stage1Dataset.load_specific_frame(
+        #     scene_id=s,
+        #     frame_id=f,
+        #     sam_folder='sam',
+        #     color_folder='iphone/rgb',
+        #     depth_folder='depth_pro/depth_map_fpx_640x480',
+        #     intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
+        # )),
         # ("preprocessed", lambda s, f: SemanticSegmentationDataset.load_specific_scene(s)),
         # ("raw", load_scene_raw),
     ]

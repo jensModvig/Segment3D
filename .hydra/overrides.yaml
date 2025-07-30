@@ -1,4 +1,4 @@
-- general.experiment_name=train_stage1_stage1_20250729_120556
+- general.experiment_name=train_stage1_stage1_20250730_100149
 - general.project_name=stage1
 - data/datasets=stage1
 - data.scenes_to_exclude='00dd871005,c4c04e6d6c'
@@ -18,5 +18,5 @@
 - data.max_frames=76320
 - data.sam_folder=gt_mask
 - data.color_folder=iphone/rgb
-- data.depth_folder=depth_pro/depth_map_fpx_256x192
-- data.intrinsic_folder=depth_pro/intrinsics_fpx_256x192
+- data.depth_folder=depth_pro/depth_map_fpx_640x480
+- data.intrinsic_folder=depth_pro/intrinsics_fpx_640x480
