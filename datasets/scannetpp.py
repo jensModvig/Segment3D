@@ -617,7 +617,7 @@ class SemanticSegmentationDataset(Dataset):
             else:
                 features = np.hstack((features, coordinates))
 
-
+        labels = np.hstack((labels, np.ones((labels.shape[0], 1))))
 
         return (
             coordinates,

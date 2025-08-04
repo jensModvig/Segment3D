@@ -35,10 +35,24 @@ class VoxelizeCollate:
         self.very_small_crops = very_small_crops
         self.probing = probing
         self.ignore_class_threshold = ignore_class_threshold
-
         self.num_queries = num_queries
 
     def __call__(self, batch):
+        """
+        Process batch through cropping and voxelization.
+        
+        Input batch: List of samples from dataset, each sample:
+        [
+            coordinates,     # (N, 3) - world coordinates  
+            features,        # (N, F) - features (color + coords)
+            labels,          # (N, 4) - [semantic, instance, segment, confidence]
+            filename,        # string
+            raw_color,       # (N, 3)
+            raw_normals,     # (N, 3)
+            raw_coordinates, # (N, 3)
+            idx              # int
+        ]
+        """
         if ("train" in self.mode) and (
             self.small_crops or self.very_small_crops
         ):
@@ -124,30 +138,25 @@ class VoxelizeCollateMerge:
                     batch_features.append(batch[i + j][1])
 
                     if j == 0:
-                        batch_filenames = batch[i + j][3]
+                        batch_filenames = batch[i + j][3]  # filename at index 3
                     else:
-                        batch_filenames = (
-                            batch_filenames + f"+{batch[i + j][3]}"
-                        )
+                        batch_filenames = batch_filenames + f"+{batch[i + j][3]}"
 
-                    batch_raw_color.append(batch[i + j][4])
-                    batch_raw_normals.append(batch[i + j][5])
+                    batch_raw_color.append(batch[i + j][4])    # raw_color at index 4
+                    batch_raw_normals.append(batch[i + j][5])  # raw_normals at index 5
 
                     # make instance ids and segment ids unique
                     # take care that -1 instances stay at -1
-                    batch_labels.append(
-                        batch[i + j][2]
-                        + [0, offset_instance_id, offset_segment_id]
-                    )
-                    batch_labels[-1][batch[i + j][2][:, 1] == -1, 1] = -1
+                    # Note: labels now have 4 columns (semantic, instance, segment, confidence)
+                    labels_copy = batch[i + j][2].copy()
+                    labels_copy[:, 1:3] += [offset_instance_id, offset_segment_id]  # Only offset instance and segment columns
+                    labels_copy[batch[i + j][2][:, 1] == -1, 1] = -1  # Keep -1 instances as -1
+                    batch_labels.append(labels_copy)
 
-                    max_instance_id, max_segment_id = batch[i + j][2].max(
-                        axis=0
-                    )[1:]
+                    # Calculate max from instance and segment columns only (columns 1 and 2)
+                    max_instance_id, max_segment_id = batch[i + j][2][:, 1:3].max(axis=0)
                     offset_segment_id = offset_segment_id + max_segment_id + 1
-                    offset_instance_id = (
-                        offset_instance_id + max_instance_id + 1
-                    )
+                    offset_instance_id = offset_instance_id + max_instance_id + 1
 
                 if (len(batch_coordinates) == 2) and self.place_nearby:
                     border = batch_coordinates[0][:, 0].max()
@@ -204,7 +213,7 @@ class VoxelizeCollateMerge:
                 else:
                     new_batch.append([batch[i][0], batch[i][1], batch[i][2]])
             batch = new_batch
-        # return voxelize(batch, self.ignore_label, self.voxel_size, self.probing, self.mode)
+        
         return voxelize(
             batch,
             self.ignore_label,
@@ -216,14 +225,26 @@ class VoxelizeCollateMerge:
 
 
 def batch_instances(batch):
+    """
+    Updated batch_instances to handle 4-column labels with confidence.
+    
+    Splits batch by instances, keeping only semantic labels for each instance.
+    
+    Input batch: List of samples [coordinates, features, labels_with_confidence]
+    Output batch: List of instance samples [coordinates, features, semantic_labels]
+    """
     new_batch = []
     for sample in batch:
-        for instance_id in np.unique(sample[2][:, 1]):
+        # sample[2] has shape (N, 4) - [semantic, instance, segment, confidence]
+        unique_instance_ids = np.unique(sample[2][:, 1])  # Get unique instance IDs
+        
+        for instance_id in unique_instance_ids:
+            instance_mask = sample[2][:, 1] == instance_id  # (N,) - bool mask for this instance
             new_batch.append(
                 (
-                    sample[0][sample[2][:, 1] == instance_id],
-                    sample[1][sample[2][:, 1] == instance_id],
-                    sample[2][sample[2][:, 1] == instance_id][:, 0],
+                    sample[0][instance_mask],           # (N_instance, 3) - coordinates for this instance
+                    sample[1][instance_mask],           # (N_instance, F) - features for this instance  
+                    sample[2][instance_mask][:, 0],     # (N_instance,) - semantic labels only for this instance
                 ),
             )
     return new_batch
@@ -241,65 +262,116 @@ def voxelize(
     label_offset,
     num_queries,
 ):
+    """
+    Voxelize batch with confidence support.
+    
+    Input batch: List of samples, each sample is:
+    [
+        coordinates,              # (N, 3) - world coordinates
+        features,                 # (N, F) - typically (N, 6) for color+coords  
+        labels,                   # (N, 4) - [semantic, instance, segment, confidence]
+        filename,                 # string
+        raw_color,                # (N, 3)
+        raw_normals,              # (N, 3)
+        raw_coordinates,          # (N, 3)
+        idx                       # int
+    ]
+    """
     (
-        coordinates,
-        features,
-        labels,
-        original_labels,
-        inverse_maps,
-        original_colors,
-        original_normals,
-        original_coordinates,
-        idx,
-    ) = ([], [], [], [], [], [], [], [], [])
+        coordinates,              # List of voxelized coordinates per batch
+        features,                 # List of voxelized features per batch
+        labels,                   # List of voxelized labels per batch (N_vox, 3) - no confidence
+        original_labels,          # List of original labels per batch (N_orig, 4) - with confidence
+        inverse_maps,             # List of inverse mapping indices per batch
+        original_colors,          # List of original colors per batch
+        original_normals,         # List of original normals per batch
+        original_coordinates,     # List of original coordinates per batch
+        idx,                      # List of sample indices
+        voxelized_confidences,    # List of voxelized confidences per batch (N_vox, 1)
+        original_confidences,     # List of original confidences per batch (N_orig, 1)
+    ) = ([], [], [], [], [], [], [], [], [], [], [])
+    
     voxelization_dict = {
         "ignore_label": ignore_label,
-        # "quantization_size": self.voxel_size,
         "return_index": True,
         "return_inverse": True,
     }
 
-    full_res_coords = []
+    full_res_coords = []  # List of full resolution coordinates per batch
 
     for sample in batch:
-        idx.append(sample[7])
-        original_coordinates.append(sample[6])
-        original_labels.append(sample[2])
-        full_res_coords.append(sample[0])
-        original_colors.append(sample[4])
-        original_normals.append(sample[5])
+        # Extract elements from sample tuple - 8 elements total (indices 0-7)
+        sample_coords = sample[0]           # (N, 3) - coordinates
+        sample_features = sample[1]         # (N, F) - features
+        sample_labels_with_conf = sample[2] # (N, 4) - [semantic, instance, segment, confidence]
+        sample_filename = sample[3]         # string
+        sample_raw_color = sample[4]        # (N, 3)
+        sample_raw_normals = sample[5]      # (N, 3) 
+        sample_raw_coords = sample[6]       # (N, 3)
+        sample_idx = sample[7]              # int
+        
+        # Store original data
+        idx.append(sample_idx)
+        original_coordinates.append(sample_raw_coords)           # (N, 3)
+        original_labels.append(sample_labels_with_conf)         # (N, 4) - keep confidence
+        full_res_coords.append(sample_coords)                   # (N, 3)
+        original_colors.append(sample_raw_color)                # (N, 3)
+        original_normals.append(sample_raw_normals)             # (N, 3)
+        
+        # Extract confidence and labels separately - ALWAYS expect confidence in column 3
+        sample_confidence = sample_labels_with_conf[:, 3:4].astype(np.float32)  # (N, 1) - confidence column
+        sample_labels_no_conf = sample_labels_with_conf[:, :3]  # (N, 3) - [semantic, instance, segment]
+        original_confidences.append(sample_confidence)          # (N, 1)
 
-        coords = np.floor(sample[0] / voxel_size)
+        # Prepare coordinates for voxelization
+        coords = np.floor(sample_coords / voxel_size)           # (N, 3) - voxel coordinates
         voxelization_dict.update(
             {
                 "coordinates": torch.from_numpy(coords).to("cpu").contiguous(),
-                "features": sample[1],
+                "features": sample_features,
             }
         )
 
-        # maybe this change (_, _, ...) is not necessary and we can directly get out
-        # the sample coordinates?
-        _, _, unique_map, inverse_map = ME.utils.sparse_quantize(
-            **voxelization_dict
-        )
+        # Perform voxelization to get unique voxel mapping
+        _, _, unique_map, inverse_map = ME.utils.sparse_quantize(**voxelization_dict)
+        # unique_map: (N_vox,) - indices of points that represent each unique voxel
+        # inverse_map: (N,) - mapping from original points to voxel indices
         inverse_maps.append(inverse_map)
 
-        sample_coordinates = coords[unique_map]
+        # Apply voxelization mapping to get unique voxel data
+        sample_coordinates = coords[unique_map]                 # (N_vox, 3) - voxelized coordinates
         coordinates.append(torch.from_numpy(sample_coordinates).int())
-        sample_features = sample[1][unique_map]
-        features.append(torch.from_numpy(sample_features).float())
-        if len(sample[2]) > 0:
-            sample_labels = sample[2][unique_map]
-            labels.append(torch.from_numpy(sample_labels).long())
+        
+        sample_features_vox = sample_features[unique_map]       # (N_vox, F) - voxelized features
+        features.append(torch.from_numpy(sample_features_vox).float())
+        
+        if len(sample_labels_no_conf) > 0:
+            sample_labels_vox = sample_labels_no_conf[unique_map]  # (N_vox, 3) - voxelized labels
+            labels.append(torch.from_numpy(sample_labels_vox).long())
+            
+            # Apply same voxelization to confidence - ALWAYS present
+            sample_conf_vox = sample_confidence[unique_map]        # (N_vox, 1) - voxelized confidence
+            voxelized_confidences.append(torch.from_numpy(sample_conf_vox).float())  # Always add confidence
 
-    # Concatenate all lists
+    # Concatenate all batch data using MinkowskiEngine sparse collate
     input_dict = {"coords": coordinates, "feats": features}
     if len(labels) > 0:
         input_dict["labels"] = labels
+        # Collate coordinates, features, and labels
         coordinates, features, labels = ME.utils.sparse_collate(**input_dict)
+        # After collate:
+        # coordinates: (B*N_vox, 4) - [batch_idx, x, y, z] 
+        # features: (B*N_vox, F)
+        # labels: (B*N_vox, 3) - [semantic, instance, segment]
+        
+        # We don't collate confidences with ME because it doesn't support arbitrary tensors
+        # Keep as list of tensors: voxelized_confidences: List[(N_vox_i, 1)]
+        # Confidence should ALWAYS be present when labels are present
+        assert len(voxelized_confidences) == len(input_dict["labels"]), "Confidence must be present for all batches with labels"
     else:
         coordinates, features = ME.utils.sparse_collate(**input_dict)
         labels = torch.Tensor([])
+        voxelized_confidences = []  # Empty if no labels
 
     if probing:
         return (
@@ -312,85 +384,95 @@ def voxelize(
             labels,
         )
 
+    # Handle segment remapping for test mode
     if mode == "test":
         for i in range(len(input_dict["labels"])):
+            # Remap semantic labels (column 0) to consecutive indices
             _, ret_index, ret_inv = np.unique(
                 input_dict["labels"][i][:, 0],
                 return_index=True,
                 return_inverse=True,
             )
             input_dict["labels"][i][:, 0] = torch.from_numpy(ret_inv)
-            # input_dict["segment2label"].append(input_dict["labels"][i][ret_index][:, :-1])
     else:
+        # Training mode - handle segment remapping
         input_dict["segment2label"] = []
 
         if "labels" in input_dict:
             for i in range(len(input_dict["labels"])):
-                # TODO BIGGER CHANGE CHECK!!!
+                # Remap segment IDs (column 2) to consecutive indices
                 _, ret_index, ret_inv = np.unique(
-                    input_dict["labels"][i][:, -1],
+                    input_dict["labels"][i][:, -1],  # segment column
                     return_index=True,
                     return_inverse=True,
                 )
                 input_dict["labels"][i][:, -1] = torch.from_numpy(ret_inv)
+                # segment2label: (N_segments, 2) - [semantic, instance] for each segment
                 input_dict["segment2label"].append(
                     input_dict["labels"][i][ret_index][:, :-1]
                 )
 
+    # Generate target masks for training/validation
     if "labels" in input_dict:
-        list_labels = input_dict["labels"]
+        list_labels = input_dict["labels"]                    # List[(N_vox_i, 3)]
+        list_confidences = voxelized_confidences             # List[(N_vox_i, 1)]
 
         target = []
         target_full = []
 
         if len(list_labels[0].shape) == 1:
+            # Semantic segmentation case - labels are 1D
             for batch_id in range(len(list_labels)):
                 label_ids = list_labels[batch_id].unique()
                 if 255 in label_ids:
                     label_ids = label_ids[:-1]
 
-                target.append(
-                    {
-                        "labels": label_ids,
-                        "masks": list_labels[batch_id]
-                        == label_ids.unsqueeze(1),
-                    }
-                )
+                target.append({
+                    "labels": label_ids,                                     # (N_classes,)
+                    "masks": list_labels[batch_id] == label_ids.unsqueeze(1), # (N_classes, N_vox)
+                })
         else:
+            # Instance segmentation case - labels are 2D
             if mode == "test":
                 for i in range(len(input_dict["labels"])):
                     target.append(
-                        {"point2segment": input_dict["labels"][i][:, 0]}
+                        {"point2segment": input_dict["labels"][i][:, 0]}  # (N_vox,) - semantic labels
                     )
                     target_full.append(
                         {
                             "point2segment": torch.from_numpy(
-                                original_labels[i][:, 0]
+                                original_labels[i][:, 0]  # (N_orig,) - original semantic labels
                             ).long()
                         }
                     )
             else:
+                # Training/validation mode - generate instance masks
                 target = get_instance_masks(
-                    list_labels,
-                    list_segments=input_dict["segment2label"],
-                    task=task,
+                    list_labels,                              # List[(N_vox_i, 3)]
+                    list_confidences,                         # List[(N_vox_i, 1)] - ALWAYS present
+                    task,
+                    list_segments=input_dict["segment2label"], # List[(N_segments_i, 2)]
                     ignore_class_threshold=ignore_class_threshold,
                     filter_out_classes=filter_out_classes,
                     label_offset=label_offset,
                 )
                 for i in range(len(target)):
-                    target[i]["point2segment"] = input_dict["labels"][i][:, 2]
+                    # Add point-to-segment mapping
+                    target[i]["point2segment"] = input_dict["labels"][i][:, 2]  # (N_vox,) - segment IDs
+                    
                 if "train" not in mode:
+                    # Also generate full resolution targets for validation
                     target_full = get_instance_masks(
-                        [torch.from_numpy(l) for l in original_labels],
-                        task=task,
+                        [torch.from_numpy(l[:, :3]) for l in original_labels],  # List[(N_orig_i, 3)] - no confidence
+                        [torch.from_numpy(c).float() for c in original_confidences],  # List[(N_orig_i, 1)] - ALWAYS present
+                        task,
                         ignore_class_threshold=ignore_class_threshold,
                         filter_out_classes=filter_out_classes,
                         label_offset=label_offset,
                     )
                     for i in range(len(target_full)):
                         target_full[i]["point2segment"] = torch.from_numpy(
-                            original_labels[i][:, 2]
+                            original_labels[i][:, 2]  # (N_orig,) - original segment IDs
                         ).long()
     else:
         target = []
@@ -398,197 +480,244 @@ def voxelize(
         coordinates = []
         features = []
 
+    # Return results
     if "train" not in mode:
         return (
             NoGpu(
-                coordinates,
-                features,
-                original_labels,
-                inverse_maps,
-                full_res_coords,
-                target_full,
-                original_colors,
-                original_normals,
-                original_coordinates,
-                idx,
+                coordinates,                # (B*N_vox, 4) - collated coordinates
+                features,                   # (B*N_vox, F) - collated features
+                original_labels,            # List[(N_orig_i, 4)] - original labels with confidence
+                inverse_maps,               # List[(N_orig_i,)] - voxel mapping per batch
+                full_res_coords,            # List[(N_orig_i, 3)] - full res coordinates per batch
+                target_full,                # List[Dict] - full resolution targets
+                original_colors,            # List[(N_orig_i, 3)] - original colors per batch
+                original_normals,           # List[(N_orig_i, 3)] - original normals per batch
+                original_coordinates,       # List[(N_orig_i, 3)] - original coordinates per batch
+                idx,                        # List[int] - sample indices
             ),
-            target,
-            [sample[3] for sample in batch],
+            target,                         # List[Dict] - voxelized targets
+            [sample[3] for sample in batch], # List[str] - filenames
         )
     else:
         return (
             NoGpu(
-                coordinates,
-                features,
-                original_labels,
-                inverse_maps,
-                full_res_coords,
+                coordinates,                # (B*N_vox, 4) - collated coordinates
+                features,                   # (B*N_vox, F) - collated features
+                original_labels,            # List[(N_orig_i, 4)] - original labels with confidence
+                inverse_maps,               # List[(N_orig_i,)] - voxel mapping per batch
+                full_res_coords,            # List[(N_orig_i, 3)] - full res coordinates per batch
             ),
-            target,
-            [sample[3] for sample in batch],
+            target,                         # List[Dict] - voxelized targets
+            [sample[3] for sample in batch], # List[str] - filenames
         )
 
 
 def get_instance_masks(
-    list_labels,
+    list_labels,                    # List[(N_vox_i, 3)] - [semantic, instance, segment] per batch
+    confidences,                    # List[(N_vox_i, 1)] - confidence per point per batch - ALWAYS required
     task,
-    list_segments=None,
+    list_segments=None,             # List[(N_segments_i, 2)] - [semantic, instance] per segment per batch
     ignore_class_threshold=100,
     filter_out_classes=[],
     label_offset=0,
 ):
+    """
+    Generate instance masks and confidence masks for each batch.
+    
+    Args:
+        list_labels: List of label tensors, each (N_vox_i, 3) with [semantic, instance, segment]
+        confidences: List of confidence tensors, each (N_vox_i, 1) with confidence values - ALWAYS required
+        
+    Returns:
+        target: List of dictionaries, each containing:
+            - "labels": (N_instances_i,) - class labels for each instance
+            - "masks": (N_instances_i, N_vox_i) - binary masks for each instance  
+            - "confidence": (N_instances_i, N_vox_i) - confidence masks for each instance - ALWAYS present
+            - "segment_mask": (N_instances_i, N_segments_i) - segment masks if segments provided
+    """
+    # Confidence must always be provided
+    assert confidences is not None, "Confidence must always be provided - no fallbacks allowed"
+    assert len(confidences) == len(list_labels), "Confidence must be provided for all batches"
+    
     target = []
 
     for batch_id in range(len(list_labels)):
-        label_ids = []
-        masks = []
-        segment_masks = []
-        instance_ids = list_labels[batch_id][:, 1].unique()
-
+        batch_labels = list_labels[batch_id]        # (N_vox, 3) - [semantic, instance, segment]
+        batch_confidence = confidences[batch_id].float()  # (N_vox, 1) - ALWAYS present
+        
+        label_ids = []                              # List of class labels for each instance
+        masks = []                                  # List of binary masks (N_vox,) for each instance
+        segment_masks = []                          # List of segment masks (N_segments,) for each instance  
+        confidence_masks = []                       # List of confidence masks (N_vox,) for each instance
+        
+        # Get unique instance IDs in this batch
+        instance_ids = batch_labels[:, 1].unique()  # (N_unique_instances,) - unique instance IDs
+        
         for instance_id in instance_ids:
             if instance_id == -1:
-                continue
+                continue  # Skip invalid instances
 
-            # TODO is it possible that a ignore class (255) is an instance???
-            # instance == -1 ???
-            tmp = list_labels[batch_id][
-                list_labels[batch_id][:, 1] == instance_id
-            ]
-            label_id = tmp[0, 0]
+            # Get all points belonging to this instance
+            instance_points_mask = batch_labels[:, 1] == instance_id  # (N_vox,) - bool mask
+            instance_points = batch_labels[instance_points_mask]      # (N_instance_points, 3)
+                
+            # Get the class label for this instance (should be consistent across all points)
+            label_id = instance_points[0, 0]  # scalar - semantic class label
 
-            if (
-                label_id in filter_out_classes
-            ):  # floor, wall, undefined==255 is not included
+            # Apply filtering
+            if label_id in filter_out_classes:
                 continue
 
             if (
                 255 in filter_out_classes
                 and label_id.item() == 255
-                and tmp.shape[0] < ignore_class_threshold
+                and instance_points.shape[0] < ignore_class_threshold
             ):
                 continue
 
-            label_ids.append(label_id)
-            masks.append(list_labels[batch_id][:, 1] == instance_id)
-
+            # Store instance information
+            label_ids.append(label_id)              # scalar
+            masks.append(instance_points_mask)      # (N_vox,) - binary mask for this instance
+            
+            # Create confidence mask for this instance - ALWAYS create
+            conf_mask = torch.zeros(batch_labels.shape[0], dtype=torch.float32)  # (N_vox,) - init to 0
+            instance_confidence = batch_confidence[instance_points_mask].squeeze().float()  # Convert to float32
+            conf_mask[instance_points_mask] = instance_confidence  # Fill instance points with their confidence
+            confidence_masks.append(conf_mask)  # (N_vox,) - confidence mask for this instance
+            
+            # Handle segment masks if provided
             if list_segments:
-                segment_mask = torch.zeros(
-                    list_segments[batch_id].shape[0]
-                ).bool()
-                segment_mask[
-                    list_labels[batch_id][
-                        list_labels[batch_id][:, 1] == instance_id
-                    ][:, 2].unique()
-                ] = True
-                segment_masks.append(segment_mask)
+                # Get unique segment IDs for this instance
+                instance_segment_ids = instance_points[:, 2].unique()  # (N_instance_segments,) - segments in this instance
+                
+                # Create segment mask: True for segments that belong to this instance
+                segment_mask = torch.zeros(list_segments[batch_id].shape[0], dtype=torch.bool)  # (N_segments,) - init to False
+                segment_mask[instance_segment_ids] = True  # Set True for segments in this instance
+                
+                segment_masks.append(segment_mask)         # (N_segments,) - segment mask for this instance
 
         if len(label_ids) == 0:
             return list()
 
-        label_ids = torch.stack(label_ids)
-        masks = torch.stack(masks)
-        if list_segments:
-            segment_masks = torch.stack(segment_masks)
+        # Stack all instance data for this batch
+        label_ids = torch.stack(label_ids)          # (N_instances,) - class labels
+        masks = torch.stack(masks)                  # (N_instances, N_vox) - binary masks
+        confidence_masks = torch.stack(confidence_masks)  # (N_instances, N_vox) - confidence masks - ALWAYS present
 
+        if list_segments:
+            segment_masks = torch.stack(segment_masks)  # (N_instances, N_segments) - segment masks
+
+        # Handle semantic segmentation task - merge instances of same class
         if task == "semantic_segmentation":
             new_label_ids = []
             new_masks = []
             new_segment_masks = []
+            new_confidence_masks = []
+            
+            # Group by unique class labels
             for label_id in label_ids.unique():
-                masking = label_ids == label_id
-
-                new_label_ids.append(label_id)
-                new_masks.append(masks[masking, :].sum(dim=0).bool())
-
+                class_mask = label_ids == label_id          # (N_instances,) - instances of this class
+                
+                new_label_ids.append(label_id)             # scalar
+                # Combine all instance masks of this class with logical OR
+                new_masks.append(masks[class_mask, :].sum(dim=0).bool())  # (N_vox,) - combined mask
+                
+                # For semantic segmentation, take max confidence across instances of same class
+                class_conf_mask = confidence_masks[class_mask, :]      # (N_class_instances, N_vox)
+                combined_conf_mask = class_conf_mask.max(dim=0)[0].float()  # (N_vox,) - max confidence per point
+                new_confidence_masks.append(combined_conf_mask)
+                
                 if list_segments:
-                    new_segment_masks.append(
-                        segment_masks[masking, :].sum(dim=0).bool()
-                    )
+                    # Combine segment masks with logical OR
+                    new_segment_masks.append(segment_masks[class_mask, :].sum(dim=0).bool())  # (N_segments,)
 
-            label_ids = torch.stack(new_label_ids)
-            masks = torch.stack(new_masks)
-
-            if list_segments:
-                segment_masks = torch.stack(new_segment_masks)
-
-                target.append(
-                    {
-                        "labels": label_ids,
-                        "masks": masks,
-                        "segment_mask": segment_masks,
-                    }
-                )
-            else:
-                target.append({"labels": label_ids, "masks": masks})
-        else:
-            l = torch.clamp(label_ids - label_offset, min=0)
+            # Replace with merged data
+            label_ids = torch.stack(new_label_ids)          # (N_classes,)
+            masks = torch.stack(new_masks)                  # (N_classes, N_vox)
+            confidence_masks = torch.stack(new_confidence_masks)  # (N_classes, N_vox) - ALWAYS present
 
             if list_segments:
-                target.append(
-                    {
-                        "labels": l,
-                        "masks": masks,
-                        "segment_mask": segment_masks,
-                    }
-                )
-            else:
-                target.append({"labels": l, "masks": masks})
+                segment_masks = torch.stack(new_segment_masks)  # (N_classes, N_segments)
+
+        # Build target dictionary for this batch - ALWAYS include confidence
+        target_dict = {
+            "labels": torch.clamp(label_ids - label_offset, min=0),  # (N_instances,) - adjusted class labels
+            "masks": masks,                                          # (N_instances, N_vox) - binary instance masks
+            "confidence": confidence_masks,                          # (N_instances, N_vox) - confidence masks - ALWAYS present
+        }
+            
+        if list_segments:
+            target_dict["segment_mask"] = segment_masks              # (N_instances, N_segments) - segment masks
+            
+        target.append(target_dict)
+        
     return target
 
-
 def make_crops(batch):
+    """
+    Modified make_crops to handle confidence in labels.
+    
+    Input batch: List of samples, each with 8 elements including labels with confidence
+    Output batch: List of cropped samples with 3 elements [coordinates, features, labels]
+    """
     new_batch = []
-    # detupling
+    # Extract first 3 elements (coordinates, features, labels) for cropping
     for scene in batch:
-        new_batch.append([scene[0], scene[1], scene[2]])
+        new_batch.append([scene[0], scene[1], scene[2]])  # [coords, features, labels]
     batch = new_batch
     new_batch = []
+    
     for scene in batch:
-        # move to center for better quadrant split
+        # Move to center for better quadrant split
         scene[0][:, :3] -= scene[0][:, :3].mean(0)
 
-        # BUGFIX - there always would be a point in every quadrant
-        scene[0] = np.vstack(
-            (
-                scene[0],
-                np.array(
-                    [
-                        [0.1, 0.1, 0.1],
-                        [0.1, -0.1, 0.1],
-                        [-0.1, 0.1, 0.1],
-                        [-0.1, -0.1, 0.1],
-                    ]
-                ),
-            )
-        )
-        scene[1] = np.vstack((scene[1], np.zeros((4, scene[1].shape[1]))))
-        scene[2] = np.concatenate(
-            (scene[2], np.full_like((scene[2]), 255)[:4])
-        )
+        # BUGFIX - Add points in each quadrant to ensure non-empty crops
+        padding_coords = np.array([
+            [0.1, 0.1, 0.1],    # +x, +y quadrant
+            [0.1, -0.1, 0.1],   # +x, -y quadrant  
+            [-0.1, 0.1, 0.1],   # -x, +y quadrant
+            [-0.1, -0.1, 0.1],  # -x, -y quadrant
+        ])
+        scene[0] = np.vstack((scene[0], padding_coords))  # (N+4, 3)
+        
+        # Add padding features  
+        padding_features = np.zeros((4, scene[1].shape[1]))  # (4, F)
+        scene[1] = np.vstack((scene[1], padding_features))   # (N+4, F)
+        
+        # Add padding labels with structure [semantic, instance, segment, confidence]
+        padding_labels = np.full((4, 4), 255, dtype=np.float32)  # (4, 4) - all columns to 255
+        padding_labels[:, 3] = 1  # Set confidence column to default value 0.5
+        scene[2] = np.vstack((scene[2], padding_labels))     # (N+4, 4)
 
+        # Create crops for each quadrant
+        # +x, +y quadrant
         crop = scene[0][:, 0] > 0
         crop &= scene[0][:, 1] > 0
         if crop.size > 1:
             new_batch.append([scene[0][crop], scene[1][crop], scene[2][crop]])
 
+        # +x, -y quadrant  
         crop = scene[0][:, 0] > 0
         crop &= scene[0][:, 1] < 0
         if crop.size > 1:
             new_batch.append([scene[0][crop], scene[1][crop], scene[2][crop]])
 
+        # -x, +y quadrant
         crop = scene[0][:, 0] < 0
         crop &= scene[0][:, 1] > 0
         if crop.size > 1:
             new_batch.append([scene[0][crop], scene[1][crop], scene[2][crop]])
 
+        # -x, -y quadrant
         crop = scene[0][:, 0] < 0
         crop &= scene[0][:, 1] < 0
         if crop.size > 1:
             new_batch.append([scene[0][crop], scene[1][crop], scene[2][crop]])
 
-    # moving all of them to center
+    # Center all crops
     for i in range(len(new_batch)):
         new_batch[i][0][:, :3] -= new_batch[i][0][:, :3].mean(0)
+    
     return new_batch
 
 

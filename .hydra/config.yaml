@@ -15,9 +15,9 @@ general:
   export: false
   use_dbscan: false
   ignore_class_threshold: 100
-  project_name: stage1
+  project_name: stage1conf
   workspace: thesis
-  experiment_name: train_stage1_stage1_20250730_100149
+  experiment_name: train_stage1_stage1conf_20250804_161612
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -68,8 +68,8 @@ data:
   use_masks_score: 0.6
   sam_folder: gt_mask
   color_folder: iphone/rgb
-  depth_folder: depth_pro/depth_map_fpx_640x480
-  intrinsic_folder: depth_pro/intrinsics_fpx_640x480
+  depth_folder: depth_pro/depth_map_fpxc_640x480
+  intrinsic_folder: depth_pro/intrinsics_fpxc_640x480
   max_frames: 76320
   scenes_to_exclude: 00dd871005,c4c04e6d6c
   label_min_area: 0
@@ -92,7 +92,7 @@ data:
     num_workers: ${data.num_workers}
     batch_size: ${data.test_batch_size}
   train_dataset:
-    _target_: datasets.stage1.Stage1Dataset
+    _target_: datasets.stage1_conf.Stage1DatasetConf
     dataset_name: scannetpp
     data_dir: data/processed
     image_augmentations_path: conf/augmentation/albumentations_aug.yaml
@@ -130,7 +130,7 @@ data:
     max_frames: ${data.max_frames}
     label_min_area: ${data.label_min_area}
   validation_dataset:
-    _target_: datasets.stage1.Stage1Dataset
+    _target_: datasets.stage1_conf.Stage1DatasetConf
     dataset_name: scannetpp
     data_dir: data/processed
     image_augmentations_path: null
@@ -159,7 +159,7 @@ data:
     max_frames: ${data.max_frames}
     label_min_area: ${data.label_min_area}
   test_dataset:
-    _target_: datasets.stage1.Stage1Dataset
+    _target_: datasets.stage1_conf.Stage1DatasetConf
     dataset_name: scannetpp
     data_dir: data/processed
     image_augmentations_path: null

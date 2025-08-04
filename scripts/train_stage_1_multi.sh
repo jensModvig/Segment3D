@@ -14,6 +14,11 @@ elif [ "$DATASET" == "stage1" ]; then
     DATASET_CONFIG="stage1"
     SAM_FOLDER="gt_mask"
     SCENES_TO_EXCLUDE=\'00dd871005,c4c04e6d6c\'
+elif [ "$DATASET" == "stage1conf" ]; then
+    echo "Training on scannetpp with confidence"
+    DATASET_CONFIG="stage1_conf"
+    SAM_FOLDER="gt_mask"
+    SCENES_TO_EXCLUDE=\'00dd871005,c4c04e6d6c\'
 else
     echo "Training on ScanNet dataset"
     DATASET_CONFIG="scannet_stage1"

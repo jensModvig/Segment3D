@@ -1,6 +1,6 @@
 # @package data
 train_dataset:
-  _target_: datasets.stage1_conf_threshold.Stage1DatasetConf
+  _target_: datasets.stage1_conf.Stage1DatasetConf
   dataset_name: "scannetpp"
   data_dir: data/processed
   image_augmentations_path: conf/augmentation/albumentations_aug.yaml
@@ -39,7 +39,7 @@ train_dataset:
   label_min_area: ${data.label_min_area}
 
 validation_dataset:
-  _target_: datasets.stage1_conf_threshold.Stage1DatasetConf
+  _target_: datasets.stage1_conf.Stage1DatasetConf
   dataset_name: "scannetpp"
   data_dir: data/processed
   image_augmentations_path: null
@@ -69,7 +69,7 @@ validation_dataset:
   label_min_area: ${data.label_min_area}
 
 test_dataset:
-  _target_: datasets.stage1_conf_threshold.Stage1DatasetConf
+  _target_: datasets.stage1_conf.Stage1DatasetConf
   dataset_name: "scannetpp"
   data_dir: data/processed
   image_augmentations_path: null

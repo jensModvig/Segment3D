@@ -594,6 +594,9 @@ class ScannetppStage1Dataset(Dataset):
             else:
                 features = np.hstack((features, coordinates))
         
+        # Default confidence to 1, to get same calculation as the original
+        labels = np.hstack((labels, np.ones((labels.shape[0], 1))))
+        
         return (
             coordinates,
             features,

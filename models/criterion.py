@@ -2,7 +2,7 @@
 # Modified by Bowen Cheng from https://github.com/facebookresearch/detr/blob/master/models/detr.py
 # Modified for Mask3D
 """
-MaskFormer criterion.
+MaskFormer criterion with confidence weighting support.
 """
 
 import torch
@@ -25,20 +25,28 @@ def dice_loss(
     inputs: torch.Tensor,
     targets: torch.Tensor,
     num_masks: float,
+    target_confidence: torch.Tensor
 ):
     """
     Compute the DICE loss, similar to generalized IOU for masks
     Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
+        inputs: A float tensor of arbitrary shape. The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary classification label for each element
+                    in inputs (0 for the negative class and 1 for the positive class).
+        confidence: A float tensor with the same shape as inputs. Confidence scores
+                   for each point's label (0 to 1).
     """
+    
     inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
-    numerator = 2 * (inputs * targets).sum(-1)
-    denominator = inputs.sum(-1) + targets.sum(-1)
+    
+    importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
+    numerator = 2 * (inputs * targets * importance).sum(-1)
+    denominator = (inputs * importance).sum(-1) + (targets * importance).sum(-1)
+    
+    # numerator = 2 * (inputs * targets).sum(-1)
+    # denominator = inputs.sum(-1) + (targets).sum(-1)
+    
     loss = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_masks
 
@@ -47,23 +55,27 @@ dice_loss_jit = torch.jit.script(dice_loss)  # type: torch.jit.ScriptModule
 
 
 def sigmoid_ce_loss(
-    inputs: torch.Tensor,
-    targets: torch.Tensor,
+    
+    inputs: torch.Tensor, # (n_masks, n_points) prob points in voxelization
+    targets: torch.Tensor, # (n_masks, n_points) prob points in voxelization
     num_masks: float,
+    target_confidence: torch.Tensor
 ):
     """
     Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
+        inputs: A float tensor of arbitrary shape. The predictions logits for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
+        confidence: A float tensor with the same shape as inputs. Confidence scores for each point's label (0 to 1).
     Returns:
         Loss tensor
     """
+
     loss = F.binary_cross_entropy_with_logits(
         inputs, targets, reduction="none"
     )
+    importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
+    loss = loss * importance
 
     return loss.mean(1).sum() / num_masks
 
@@ -169,8 +181,15 @@ class SetCriterion(nn.Module):
         return losses
 
     def loss_masks(self, outputs, targets, indices, num_masks, mask_type):
-        """Compute the losses related to the masks: the focal loss and the dice loss.
+        """Compute the losses related to the masks with point-level confidence weighting: the focal loss and the dice loss.
         targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
+        
+        Args:
+            outputs: Model outputs containing pred_masks
+            targets: List of target dictionaries, including confidence
+            indices: Matching indices from matcher
+            num_masks: Number of masks for normalization
+            mask_type: Key to access masks in targets
         """
         assert "pred_masks" in outputs
 
@@ -180,6 +199,7 @@ class SetCriterion(nn.Module):
         for batch_id, (map_id, target_id) in enumerate(indices):
             map = outputs["pred_masks"][batch_id][:, map_id].T
             target_mask = targets[batch_id][mask_type][target_id]
+            target_confidence = targets[batch_id]["confidence"][target_id]
 
             if self.num_points != -1:
                 point_idx = torch.randperm(
@@ -194,65 +214,16 @@ class SetCriterion(nn.Module):
             num_masks = target_mask.shape[0]
             map = map[:, point_idx]
             target_mask = target_mask[:, point_idx].float()
-
-            loss_masks.append(sigmoid_ce_loss_jit(map, target_mask, num_masks))
-            loss_dices.append(dice_loss_jit(map, target_mask, num_masks))
-        # del target_mask
+            target_confidence = target_confidence[:, point_idx].float()
+            
+            loss_masks.append(sigmoid_ce_loss_jit(map, target_mask, num_masks, target_confidence))
+            loss_dices.append(dice_loss_jit(map, target_mask, num_masks, target_confidence))
+        
         return {
             "loss_mask": torch.sum(torch.stack(loss_masks)),
             "loss_dice": torch.sum(torch.stack(loss_dices)),
         }
-
-        src_idx = self._get_src_permutation_idx(indices)
-        tgt_idx = self._get_tgt_permutation_idx(indices)
-        src_masks = outputs["pred_masks"]
-        src_masks = src_masks[src_idx]
-        masks = [t[mask_type] for t in targets]
-        # TODO use valid to mask invalid areas due to padding in loss
-        target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
-        target_masks = target_masks.to(src_masks)
-        target_masks = target_masks[tgt_idx]
-
-        # No need to upsample predictions as we are using normalized coordinates :)
-        # N x 1 x H x W
-        src_masks = src_masks[:, None]
-        target_masks = target_masks[:, None]
-
-        with torch.no_grad():
-            # sample point_coords
-            point_coords = get_uncertain_point_coords_with_randomness(
-                src_masks,
-                lambda logits: calculate_uncertainty(logits),
-                self.num_points,
-                self.oversample_ratio,
-                self.importance_sample_ratio,
-            )
-            # get gt labels
-            point_labels = point_sample(
-                target_masks,
-                point_coords,
-                align_corners=False,
-            ).squeeze(1)
-
-        point_logits = point_sample(
-            src_masks,
-            point_coords,
-            align_corners=False,
-        ).squeeze(1)
-
-        losses = {
-            "loss_mask": sigmoid_ce_loss_jit(
-                point_logits, point_labels, num_masks, mask_type
-            ),
-            "loss_dice": dice_loss_jit(
-                point_logits, point_labels, num_masks, mask_type
-            ),
-        }
-
-        del src_masks
-        del target_masks
-        return losses
-
+    
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat(
@@ -268,9 +239,12 @@ class SetCriterion(nn.Module):
         )
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
-
+    
     def get_loss(self, loss, outputs, targets, indices, num_masks, mask_type):
-        loss_map = {"labels": self.loss_labels, "masks": self.loss_masks}
+        loss_map = {
+            "labels": self.loss_labels,
+            "masks": self.loss_masks
+        }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks, mask_type)
 
@@ -280,6 +254,8 @@ class SetCriterion(nn.Module):
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
+                      If confidence weighting is used, targets should contain a "confidence" key
+                      with the same structure as the masks.
         """
         outputs_without_aux = {
             k: v for k, v in outputs.items() if k != "aux_outputs"
@@ -303,9 +279,7 @@ class SetCriterion(nn.Module):
         losses = {}
         for loss in self.losses:
             losses.update(
-                self.get_loss(
-                    loss, outputs, targets, indices, num_masks, mask_type
-                )
+                self.get_loss(loss, outputs, targets, indices, num_masks, mask_type)
             )
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.

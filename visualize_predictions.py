@@ -12,6 +12,7 @@ from datasets.scannetpp_stage1 import ScannetppStage1Dataset
 from datasets.scannetpp import SemanticSegmentationDataset
 from datasets.stage1 import Stage1Dataset as Stage1default
 from datasets.stage1_conf import Stage1Dataset as Stage1conf
+from datasets.stage1_conf_threshold import Stage1DatasetConf as Stage1conf_threshold 
 
 try:
     from thes.paths import scannetpp_raw_dir
@@ -160,18 +161,26 @@ def main():
         #     depth_folder='depth_pro/depth_map_fpx_256x192',
         #     intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
         # )),
-        ("stage1_gt_depth640", lambda s, f: Stage1default.load_specific_frame(
+        # ("stage1_gt_depth640", lambda s, f: Stage1default.load_specific_frame(
+        #     scene_id=s,
+        #     frame_id=f,
+        #     sam_folder='sam',
+        #     color_folder='iphone/rgb',
+        #     depth_folder='depth_pro/depth_map_fpx_640x480',
+        #     intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
+        # )),
+        ("stage1_gt_depth640_conf", lambda s, f: Stage1conf.load_specific_frame(
             scene_id=s,
             frame_id=f,
-            sam_folder='sam',
+            sam_folder='gt_mask',
             color_folder='iphone/rgb',
             depth_folder='depth_pro/depth_map_fpx_640x480',
             intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
         )),
-        ("stage1_gt_depth640_conf", lambda s, f: Stage1conf.load_specific_frame(
+        ("stage1_gt_depth640_conf_thresh", lambda s, f: Stage1conf_threshold.load_specific_frame(
             scene_id=s,
             frame_id=f,
-            sam_folder='sam',
+            sam_folder='gt_mask',
             color_folder='iphone/rgb',
             depth_folder='depth_pro/depth_map_fpx_640x480',
             intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
@@ -195,6 +204,9 @@ def main():
         # ("preprocessed", lambda s, f: SemanticSegmentationDataset.load_specific_scene(s)),
         # ("raw", load_scene_raw),
     ]
+    
+    dataset_names = [name for name, _ in datasets]
+    assert len(dataset_names) == len(set(dataset_names)), f"Duplicate dataset names found: {[name for name in dataset_names if dataset_names.count(name) > 1]}"
     
     success_count = sum(process_dataset(name, loader, args.scene_id, args.frame_id, 
                                       model, cfg, device, output_dir) 

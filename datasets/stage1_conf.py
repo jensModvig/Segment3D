@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 
-class Stage1Dataset(Dataset):
+class Stage1DatasetConf(Dataset):
     def __init__(
         self,
         dataset_name="scannetpp",
@@ -212,7 +212,7 @@ class Stage1Dataset(Dataset):
                             color_folder='iphone/rgb',
                             depth_folder='iphone/depth',
                             intrinsic_folder='not_set'):
-        dataset = Stage1Dataset(
+        dataset = Stage1DatasetConf(
             mode="validation",
             point_per_cut=0,
             cropping=False,
@@ -342,8 +342,7 @@ class Stage1Dataset(Dataset):
         confidence_image = depth_data['confidence']
         depth_dims = depth_image.shape[:2][::-1]
         
-        confidence_mask = (confidence_image.astype(np.float32) / 65535.0) >= 0.5
-        depth_image[~confidence_mask] = 0
+        confidence = confidence_image.astype(np.float32) / 65535.0
         
         color_path = scannetpp_data / scene_id / self.color_folder / f'{frame_id}.jpg'
         color_image = cv2.imread(str(color_path))
@@ -360,9 +359,13 @@ class Stage1Dataset(Dataset):
             sam_groups = np.array(img, dtype=np.int16)
             sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
 
-        mask = (depth_image != 0)
-        colors = np.reshape(color_image[mask], [-1,3])
-        sam_groups = sam_groups[mask]
+        valid_depth_mask = (depth_image != 0)
+        colors = np.reshape(color_image[valid_depth_mask], [-1,3])
+        sam_groups = sam_groups[valid_depth_mask]
+        confidence = confidence[valid_depth_mask]
+        
+        # label low confidence as noise/unique label id
+        sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
 
         depth_shift = 1000.0
         x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
@@ -385,14 +388,14 @@ class Stage1Dataset(Dataset):
         points[:,1] = Y
         points[:,2] = uv_depth[:,2]
         points_world = np.dot(points, np.transpose(pose))
-        sam_groups = self.num_to_natural(sam_groups)
+        sam_groups = self.num_to_natural(sam_groups) # (N,)
 
         if self.label_min_area != 0:
             counts = Counter(sam_groups)
             for num, count in counts.items():
                 if count < self.label_min_area:
                     sam_groups[sam_groups == num] = -1
-            sam_groups = self.num_to_natural(sam_groups)
+            sam_groups = self.num_to_natural(sam_groups) # (N,)
         if np.all(sam_groups == -1):
             raise ValueError(f'Invalid frame {scene_id}/{frame_id} contains no groups after filtering.')
 
@@ -400,7 +403,14 @@ class Stage1Dataset(Dataset):
         color = colors
         normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
-        labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
+        labels = np.concatenate(
+            [
+                np.zeros(coordinates.shape[0]).reshape(-1, 1), # (N, 1)
+                sam_groups.reshape(-1, 1) # (N, 1)
+            ],
+            axis=1
+        ) # (N, 2) (zeros, sam_labels)
+        confidence = confidence.reshape(-1, 1) # (N, 1)
 
         raw_coordinates = coordinates.copy()
         raw_color = color
@@ -425,6 +435,7 @@ class Stage1Dataset(Dataset):
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
                 points = points[new_idx]
+                confidence = confidence[new_idx]
 
             coordinates -= coordinates.mean(0)
             try:
@@ -494,12 +505,11 @@ class Stage1Dataset(Dataset):
                     indexes = crop(
                         coordinates, x_min, y_min, z_min, x_max, y_max, z_max
                     )
-                    coordinates, normals, color, labels = (
-                        coordinates[~indexes],
-                        normals[~indexes],
-                        color[~indexes],
-                        labels[~indexes],
-                    )
+                    coordinates = coordinates[~indexes]
+                    normals = normals[~indexes]
+                    color = color[~indexes]
+                    labels = labels[~indexes]
+                    confidence = confidence[~indexes]
 
             # if self.noise_rate > 0:
             #     coordinates, color, normals, labels = random_points(
@@ -583,6 +593,7 @@ class Stage1Dataset(Dataset):
                             np.full_like(unlabeled_labels, self.ignore_label),
                         )
                     )
+                    confidence = np.concatenate((confidence, np.zeros(len(unlabeled_coords))))
 
             if random() < self.color_drop:
                 color[:] = 255
@@ -591,29 +602,32 @@ class Stage1Dataset(Dataset):
         pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
         color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
         # prepare labels and map from 0 to 20(40)
-        labels = labels.astype(np.int32)
-        labels = np.hstack((labels, segments[..., None].astype(np.int32)))
+        labels = labels.astype(np.int32) # (N, 2) (zeros, sam_labels)
+        labels = np.hstack((labels, segments[..., None].astype(np.int32))) # (N, 3) (zeros, sam_labels, segments/ones)
 
-        features = color
+        features = color # (N, 3)
         if self.add_normals:
-            features = np.hstack((features, normals))
+            features = np.hstack((features, normals)) # never executed
         if self.add_raw_coordinates:
             if len(features.shape) == 1:
                 features = np.hstack((features[None, ...], coordinates))
             else:
-                features = np.hstack((features, coordinates))
+                features = np.hstack((features, coordinates)) # (N, 6)
+        
+        labels = np.hstack((labels, confidence)) # (N, 4) (zeros, sam_labels, segments/ones, confidences)
+        
         
         return (
-            coordinates,
-            features,
-            labels,
+            coordinates, # (N, 3)
+            features, # (N, 6), (color, raw_coords)
+            labels, # (N, 4) (zeros, sam_labels, segments/ones, confidences)
             f'{scene_id}/{frame_id}',
             raw_color,
             raw_normals,
             raw_coordinates,
             idx,
         )
-
+        
 
     @property
     def data(self):
