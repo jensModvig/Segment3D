@@ -108,9 +108,9 @@ hydra:
     - hydra.run.dir="/work3/s173955/Segment3D"
     - hydra.job.name=train_ddp_process_1
     task:
-    - general.experiment_name=train_stage1_stage1conf_20250804_161612
-    - general.project_name=stage1conf
-    - data/datasets=stage1_conf
+    - general.experiment_name=train_stage1_scannetpp_20250805_151231
+    - general.project_name=scannetpp
+    - data/datasets=scannetpp_stage1
     - data.scenes_to_exclude='00dd871005,c4c04e6d6c'
     - data.max_frames=76320
     - optimizer.lr=0.0002
@@ -124,15 +124,13 @@ hydra:
     - general.save_visualizations=False
     - general.gpus=2
     - model.num_queries=100
+    - general.experiment_name=train_stage1_scannetpp_20250804_151747
     - optimizer.lr=0.0002
     - data.max_frames=76320
     - data.sam_folder=gt_mask
-    - data.color_folder=iphone/rgb
-    - data.depth_folder=depth_pro/depth_map_fpxc_640x480
-    - data.intrinsic_folder=depth_pro/intrinsics_fpxc_640x480
   job:
     name: train_ddp_process_1
-    override_dirname: data.batch_size=8,data.color_folder=iphone/rgb,data.depth_folder=depth_pro/depth_map_fpxc_640x480,data.intrinsic_folder=depth_pro/intrinsics_fpxc_640x480,data.label_min_area=0,data.max_frames=76320,data.max_frames=76320,data.num_workers=4,data.sam_folder=gt_mask,data.sam_folder=gt_mask,data.scenes_to_exclude='00dd871005,c4c04e6d6c',data/datasets=stage1_conf,general.experiment_name=train_stage1_stage1conf_20250804_161612,general.gpus=2,general.project_name=stage1conf,general.save_visualizations=False,model.num_queries=100,optimizer.lr=0.0002,optimizer.lr=0.0002,trainer.log_every_n_steps=500,trainer.max_epochs=20,trainer.val_check_interval=2000
+    override_dirname: data.batch_size=8,data.label_min_area=0,data.max_frames=76320,data.max_frames=76320,data.num_workers=4,data.sam_folder=gt_mask,data.sam_folder=gt_mask,data.scenes_to_exclude='00dd871005,c4c04e6d6c',data/datasets=scannetpp_stage1,general.experiment_name=train_stage1_scannetpp_20250804_151747,general.experiment_name=train_stage1_scannetpp_20250805_151231,general.gpus=2,general.project_name=scannetpp,general.save_visualizations=False,model.num_queries=100,optimizer.lr=0.0002,optimizer.lr=0.0002,trainer.log_every_n_steps=500,trainer.max_epochs=20,trainer.val_check_interval=2000
     id: ???
     num: ???
     config_name: config_base_instance_segmentation_stage1.yaml
