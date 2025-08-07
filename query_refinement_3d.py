@@ -1,0 +1,202 @@
+import argparse
+import numpy as np
+import torch
+from pathlib import Path
+from hydra.experimental import initialize, compose
+from demo_utils import get_model
+from datasets.scannetpp_stage1 import ScannetppStage1Dataset
+import albumentations as A
+import MinkowskiEngine as ME
+import cv2
+from PIL import Image
+
+
+class ModelSpaceTransformer:
+    def __init__(self, cfg, device):
+        self.voxel_size = cfg.data.voxel_size
+        self.device = device
+        
+    def prepare_pointcloud(self, mesh):
+        points = np.asarray(mesh.vertices)
+        coords = np.floor(points / self.voxel_size)
+        colors = np.asarray(mesh.vertex_colors) * 255
+        colors = np.squeeze(A.Normalize(
+            mean=(0.47793125906962, 0.4303257521323044, 0.3749598901421883),
+            std=(0.2834475483823543, 0.27566157565723015, 0.27018971370874995)
+        )(image=colors.astype(np.uint8)[np.newaxis, :, :])["image"])
+        
+        self.unique_map, self.inverse_map = ME.utils.sparse_quantize(
+            coordinates=coords, features=colors, return_index=True, 
+            return_inverse=True, return_maps_only=True)
+        
+        coordinates = [torch.from_numpy(coords[self.unique_map]).int()]
+        features = [torch.from_numpy(colors[self.unique_map]).float()]
+        coordinates, *_ = ME.utils.sparse_collate(coords=coordinates, feats=features)
+        features = torch.cat(features, dim=0)
+        self.raw_coordinates = torch.from_numpy(points[self.unique_map]).float().to(self.device)
+        
+        return ME.SparseTensor(coordinates=coordinates, features=features, device=self.device)
+
+
+def load_sam_labels_3d(scene_id, frame_id, sam_folder):
+    data_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
+    depth_path = data_path / scene_id / 'iphone/depth' / f'{frame_id}.png'
+    sam_path = data_path / scene_id / sam_folder / f"{frame_id}.png"
+    
+    if not depth_path.exists():
+        raise FileNotFoundError(f"Depth file not found: {depth_path}")
+    if not sam_path.exists():
+        raise FileNotFoundError(f"SAM file not found: {sam_path}")
+    
+    depth_image = cv2.imread(str(depth_path), -1)
+    sam_groups = cv2.resize(np.array(Image.open(sam_path), dtype=np.int16), 
+                           (256, 192), interpolation=cv2.INTER_NEAREST)
+    
+    sam_groups = sam_groups[depth_image != 0]
+    
+    if np.all(sam_groups == -1):
+        return sam_groups, []
+    
+    unique_values = np.unique(sam_groups[sam_groups != -1])
+    mapping = np.full(np.max(unique_values) + 2, -1)
+    mapping[unique_values + 1] = np.arange(len(unique_values))
+    sam_labels_3d = mapping[sam_groups + 1]
+    
+    valid_sam_ids = np.unique(sam_labels_3d)
+    valid_sam_ids = valid_sam_ids[valid_sam_ids != -1]
+    
+    return sam_labels_3d, valid_sam_ids
+
+
+def get_depth_mask(scene_id, frame_id):
+    depth_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/') / scene_id / 'iphone/depth' / f'{frame_id}.png'
+    return (cv2.imread(str(depth_path), -1) != 0)
+
+
+def get_model_masks(cfg, model, data, transformer):
+    with torch.no_grad():
+        outputs = model.model(data, point2segment=None, raw_coordinates=transformer.raw_coordinates)
+    
+    masks = outputs["pred_masks"][0].detach().cpu()
+    logits = outputs["pred_logits"][0].detach().cpu()
+    
+    mask_cls = logits[:, 0] if logits.shape[1] == 1 else logits[:, 1]
+    result_pred_mask = (masks > 0).float()
+    valid_masks = result_pred_mask.sum(0) > 0
+    masks = masks[:, valid_masks]
+    mask_cls = mask_cls[valid_masks]
+    result_pred_mask = result_pred_mask[:, valid_masks]
+    
+    scores = mask_cls.sigmoid() * (masks.float().sigmoid() * result_pred_mask).sum(0) / (result_pred_mask.sum(0) + 1e-6)
+    topk_count = min(cfg.general.topk_per_image, len(scores)) if cfg.general.topk_per_image != -1 else len(scores)
+    _, topk_indices = scores.topk(topk_count, sorted=True)
+    
+    return [(masks[:, idx][transformer.inverse_map].sigmoid().numpy() > 0.5).astype(np.float32) 
+            for idx in topk_indices]
+
+
+def calculate_iou(mask1, mask2):
+    intersection = np.logical_and(mask1, mask2).sum()
+    union = np.logical_or(mask1, mask2).sum()
+    return intersection / union if union > 0 else 0.0
+
+
+def select_and_merge_masks(model_masks, sam_labels_3d, sam_ids, selection_threshold, merge_threshold):
+    selected_masks = []
+    
+    for sam_id in sam_ids:
+        sam_binary = (sam_labels_3d == sam_id).astype(np.float32)
+        best_iou, best_mask = 0, None
+        
+        for model_mask in model_masks:
+            iou = calculate_iou(model_mask, sam_binary)
+            if iou > best_iou:
+                best_iou, best_mask = iou, model_mask
+        
+        if best_iou > selection_threshold:
+            selected_masks.append(best_mask)
+    
+    if not selected_masks:
+        return []
+    
+    groups, used = [], set()
+    for i, mask1 in enumerate(selected_masks):
+        if i in used:
+            continue
+        group = [i]
+        used.add(i)
+        
+        for j, mask2 in enumerate(selected_masks[i+1:], i+1):
+            if j not in used and calculate_iou(mask1, mask2) > merge_threshold:
+                group.append(j)
+                used.add(j)
+        groups.append(group)
+    
+    merged_masks = []
+    for group in groups:
+        if len(group) == 1:
+            merged_masks.append(selected_masks[group[0]])
+        else:
+            merged_mask = np.zeros_like(selected_masks[0])
+            for idx in group:
+                merged_mask = np.logical_or(merged_mask, selected_masks[idx])
+            merged_masks.append(merged_mask.astype(np.float32))
+    
+    return merged_masks
+
+
+def map_to_2d_and_save(masks_3d, depth_mask, output_path):
+    """Map 3D masks back to 2D using depth mask correspondence (not geometric projection)"""
+    if not masks_3d:
+        return
+        
+    h, w = depth_mask.shape
+    output_image = np.full((h, w), -1, dtype=np.int16)
+    
+    for i, mask_3d in enumerate(masks_3d):
+        mask_2d_indices = np.full((h, w), False, dtype=bool)
+        mask_2d_indices[depth_mask] = mask_3d > 0
+        output_image[mask_2d_indices] = i
+    
+    Image.fromarray(output_image.astype(np.uint16)).save(output_path)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--scene_id", required=True)
+    parser.add_argument("--frame_id", required=True)
+    parser.add_argument("--output_dir", default="sam_analysis")
+    parser.add_argument("--sam_folder", default="gt_mask")
+    parser.add_argument("--selection_iou_threshold", type=float, default=0.01)
+    parser.add_argument("--merge_iou_threshold", type=float, default=0.9)
+    args = parser.parse_args()
+    
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    with initialize(config_path="conf"):
+        cfg = compose(config_name="config_base_instance_segmentation.yaml")
+    
+    cfg.general.checkpoint = args.checkpoint
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = get_model(cfg).eval().to(device)
+    
+    coords, colors, _ = ScannetppStage1Dataset.load_specific_frame(args.scene_id, args.frame_id)
+    transformer = ModelSpaceTransformer(cfg, device)
+    data = transformer.prepare_pointcloud(type('M', (), {'vertices': coords, 'vertex_colors': colors})())
+    
+    sam_labels_3d, sam_ids = load_sam_labels_3d(args.scene_id, args.frame_id, args.sam_folder)
+    model_masks = get_model_masks(cfg, model, data, transformer)
+    
+    merged_masks = select_and_merge_masks(
+        model_masks, sam_labels_3d, sam_ids, 
+        args.selection_iou_threshold, args.merge_iou_threshold
+    )
+    
+    depth_mask = get_depth_mask(args.scene_id, args.frame_id)
+    map_to_2d_and_save(merged_masks, depth_mask, output_dir / "final_masks_2d.png")
+
+
+if __name__ == "__main__":
+    main()

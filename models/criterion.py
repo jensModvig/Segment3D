@@ -40,12 +40,12 @@ def dice_loss(
     inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
     
-    importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
-    numerator = 2 * (inputs * targets * importance).sum(-1)
-    denominator = (inputs * importance).sum(-1) + (targets * importance).sum(-1)
+    # importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
+    # numerator = 2 * (inputs * targets * importance).sum(-1)
+    # denominator = (inputs * importance).sum(-1) + (targets * importance).sum(-1)
     
-    # numerator = 2 * (inputs * targets).sum(-1)
-    # denominator = inputs.sum(-1) + (targets).sum(-1)
+    numerator = 2 * (inputs * targets).sum(-1)
+    denominator = inputs.sum(-1) + (targets).sum(-1)
     
     loss = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_masks
@@ -74,8 +74,8 @@ def sigmoid_ce_loss(
     loss = F.binary_cross_entropy_with_logits(
         inputs, targets, reduction="none"
     )
-    importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
-    loss = loss * importance
+    # importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
+    # loss = loss * importance
 
     return loss.mean(1).sum() / num_masks
 

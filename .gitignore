@@ -181,3 +181,4 @@ cython_debug/
 demo_test/TEST_SCENE*
 checkpoints/
 worker_state/*
+**/*.png
