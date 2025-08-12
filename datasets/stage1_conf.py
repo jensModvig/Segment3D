@@ -164,14 +164,15 @@ class Stage1DatasetConf(Dataset):
 
         # loading database files
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
+        self.resolution = '640x480'
 
         if data is not None:
             self._data = data
         else:
             if self.mode == "train":
-                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train.txt')
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train_depth_{self.resolution}_filtered.txt')
             else:
-                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val.txt')
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val_depth_{self.resolution}_filtered.txt')
                 
             if not data_path.is_file():
                 raise FileNotFoundError(f'Cannot find {self.mode} file with {self.max_frames} max frames.')
@@ -342,6 +343,9 @@ class Stage1DatasetConf(Dataset):
         confidence_image = depth_data['confidence']
         depth_dims = depth_image.shape[:2][::-1]
         
+        if self.resolution != f'{depth_dims[0]}x{depth_dims[1]}':
+            raise ValueError('Wrong resolution')
+        
         confidence = confidence_image.astype(np.float32) / 65535.0
         
         color_path = scannetpp_data / scene_id / self.color_folder / f'{frame_id}.jpg'
@@ -349,9 +353,8 @@ class Stage1DatasetConf(Dataset):
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
         color_image = cv2.resize(color_image, depth_dims)
 
-        pose_intrinsic_data = np.load(scannetpp_data / scene_id / self.intrinsic_folder / f'{frame_id}.npz')
-        pose = pose_intrinsic_data['extrinsics']
-        depth_intrinsics = pose_intrinsic_data['intrinsics']
+        pose = depth_data['extrinsics']
+        depth_intrinsics = depth_data['intrinsics']
 
         sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
         with open(sam_path, 'rb') as image_file:
