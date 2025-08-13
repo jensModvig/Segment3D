@@ -393,7 +393,7 @@ def voxelize(
                     generated_masks,
                     generated_masks_scores,
                     list_labels,
-                    list_segments=input_dict["segment2label"],
+                    list_segments=None,#input_dict["segment2label"],
                     task=task,
                     ignore_class_threshold=ignore_class_threshold,
                     filter_out_classes=filter_out_classes,

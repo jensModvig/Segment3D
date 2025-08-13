@@ -21,7 +21,7 @@ from models.misc import (
 )
 
 
-def dice_loss(
+def dice_loss_with_confidence(
     inputs: torch.Tensor,
     targets: torch.Tensor,
     num_masks: float,
@@ -44,18 +44,33 @@ def dice_loss(
     numerator = 2 * (inputs * targets * importance).sum(-1)
     denominator = (inputs * importance).sum(-1) + (targets * importance).sum(-1)
     
-    # numerator = 2 * (inputs * targets).sum(-1)
-    # denominator = inputs.sum(-1) + (targets).sum(-1)
+    loss = 1 - (numerator + 1) / (denominator + 1)
+    return loss.sum() / num_masks
+
+
+def dice_loss_standard(
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    num_masks: float
+):
+    """
+    Compute the DICE loss, similar to generalized IOU for masks
+    Args:
+        inputs: A float tensor of arbitrary shape. The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary classification label for each element
+                    in inputs (0 for the negative class and 1 for the positive class).
+    """
+    inputs = inputs.sigmoid()
+    inputs = inputs.flatten(1)
+    
+    numerator = 2 * (inputs * targets).sum(-1)
+    denominator = inputs.sum(-1) + targets.sum(-1)
     
     loss = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_masks
 
 
-dice_loss_jit = torch.jit.script(dice_loss)  # type: torch.jit.ScriptModule
-
-
-def sigmoid_ce_loss(
-    
+def sigmoid_ce_loss_with_confidence(
     inputs: torch.Tensor, # (n_masks, n_points) prob points in voxelization
     targets: torch.Tensor, # (n_masks, n_points) prob points in voxelization
     num_masks: float,
@@ -80,9 +95,26 @@ def sigmoid_ce_loss(
     return loss.mean(1).sum() / num_masks
 
 
-sigmoid_ce_loss_jit = torch.jit.script(
-    sigmoid_ce_loss
-)  # type: torch.jit.ScriptModule
+def sigmoid_ce_loss_standard(
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    num_masks: float
+):
+    """
+    Standard sigmoid cross-entropy loss without confidence weighting
+    """
+    loss = F.binary_cross_entropy_with_logits(
+        inputs, targets, reduction="none"
+    )
+
+    return loss.mean(1).sum() / num_masks
+
+
+# Create JIT versions for both variants
+dice_loss_with_conf_jit = torch.jit.script(dice_loss_with_confidence)
+dice_loss_standard_jit = torch.jit.script(dice_loss_standard)
+sigmoid_ce_loss_with_conf_jit = torch.jit.script(sigmoid_ce_loss_with_confidence)
+sigmoid_ce_loss_standard_jit = torch.jit.script(sigmoid_ce_loss_standard)
 
 
 def calculate_uncertainty(logits):
@@ -186,7 +218,7 @@ class SetCriterion(nn.Module):
         
         Args:
             outputs: Model outputs containing pred_masks
-            targets: List of target dictionaries, including confidence
+            targets: List of target dictionaries, optionally including confidence
             indices: Matching indices from matcher
             num_masks: Number of masks for normalization
             mask_type: Key to access masks in targets
@@ -199,7 +231,6 @@ class SetCriterion(nn.Module):
         for batch_id, (map_id, target_id) in enumerate(indices):
             map = outputs["pred_masks"][batch_id][:, map_id].T
             target_mask = targets[batch_id][mask_type][target_id]
-            target_confidence = targets[batch_id]["confidence"][target_id]
 
             if self.num_points != -1:
                 point_idx = torch.randperm(
@@ -214,10 +245,16 @@ class SetCriterion(nn.Module):
             num_masks = target_mask.shape[0]
             map = map[:, point_idx]
             target_mask = target_mask[:, point_idx].float()
-            target_confidence = target_confidence[:, point_idx].float()
             
-            loss_masks.append(sigmoid_ce_loss_jit(map, target_mask, num_masks, target_confidence))
-            loss_dices.append(dice_loss_jit(map, target_mask, num_masks, target_confidence))
+            if "confidence" in targets[batch_id]:
+                target_confidence = targets[batch_id]["confidence"][target_id]
+                target_confidence = target_confidence[:, point_idx].float()
+                
+                loss_masks.append(sigmoid_ce_loss_with_conf_jit(map, target_mask, num_masks, target_confidence))
+                loss_dices.append(dice_loss_with_conf_jit(map, target_mask, num_masks, target_confidence))
+            else:
+                loss_masks.append(sigmoid_ce_loss_standard_jit(map, target_mask, num_masks))
+                loss_dices.append(dice_loss_standard_jit(map, target_mask, num_masks))
         
         return {
             "loss_mask": torch.sum(torch.stack(loss_masks)),
