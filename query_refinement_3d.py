@@ -9,6 +9,7 @@ import albumentations as A
 import MinkowskiEngine as ME
 import cv2
 from PIL import Image
+import glob
 
 
 class ModelSpaceTransformer:
@@ -38,18 +39,32 @@ class ModelSpaceTransformer:
         return ME.SparseTensor(coordinates=coordinates, features=features, device=self.device)
 
 
-def load_sam_labels_3d(scene_id, frame_id, sam_folder):
+def get_input_path(scene_id, frame_id, shared_folder, sam_folder):
+    shared_q2_files = sorted(glob.glob(f"{shared_folder}/{scene_id}_{frame_id}_i*_q2.png"))
+    if shared_q2_files:
+        return Path(shared_q2_files[-1])
+    return Path(f'/work3/s173955/bigdata/processed/scannetpp/data/{scene_id}/{sam_folder}/{frame_id}.png')
+
+
+def get_iteration_number(scene_id, frame_id, shared_folder):
+    shared_files = glob.glob(f"{shared_folder}/{scene_id}_{frame_id}_i*_q*.png")
+    if not shared_files:
+        return 1
+    iterations = [int(f.split('_i')[1].split('_')[0]) for f in shared_files]
+    return max(iterations) + 1
+
+
+def load_sam_labels_3d(scene_id, frame_id, input_path):
     data_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
     depth_path = data_path / scene_id / 'iphone/depth' / f'{frame_id}.png'
-    sam_path = data_path / scene_id / sam_folder / f"{frame_id}.png"
     
     if not depth_path.exists():
         raise FileNotFoundError(f"Depth file not found: {depth_path}")
-    if not sam_path.exists():
-        raise FileNotFoundError(f"SAM file not found: {sam_path}")
+    if not input_path.exists():
+        raise FileNotFoundError(f"SAM file not found: {input_path}")
     
     depth_image = cv2.imread(str(depth_path), -1)
-    sam_groups = cv2.resize(np.array(Image.open(sam_path), dtype=np.int16), 
+    sam_groups = cv2.resize(np.array(Image.open(input_path), dtype=np.int16), 
                            (256, 192), interpolation=cv2.INTER_NEAREST)
     
     sam_groups = sam_groups[depth_image != 0]
@@ -146,7 +161,6 @@ def select_and_merge_masks(model_masks, sam_labels_3d, sam_ids, selection_thresh
 
 
 def map_to_2d_and_save(masks_3d, depth_mask, output_path):
-    """Map 3D masks back to 2D using depth mask correspondence (not geometric projection)"""
     if not masks_3d:
         return
         
@@ -166,14 +180,17 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--scene_id", required=True)
     parser.add_argument("--frame_id", required=True)
-    parser.add_argument("--output_dir", default="sam_analysis")
-    parser.add_argument("--sam_folder", default="gt_mask")
-    parser.add_argument("--selection_iou_threshold", type=float, default=0.01)
-    parser.add_argument("--merge_iou_threshold", type=float, default=0.9)
+    parser.add_argument("--shared_folder", default="/work3/s173955/data/label_refinement")
+    parser.add_argument("--sam_folder", default="sam")
+    parser.add_argument("--selection_iou_threshold", type=float, default=0.001)
+    parser.add_argument("--merge_iou_threshold", type=float, default=0.1)
     args = parser.parse_args()
     
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    Path(args.shared_folder).mkdir(parents=True, exist_ok=True)
+    
+    input_path = get_input_path(args.scene_id, args.frame_id, args.shared_folder, args.sam_folder)
+    print('using input path', input_path)
+    iteration = get_iteration_number(args.scene_id, args.frame_id, args.shared_folder)
     
     with initialize(config_path="conf"):
         cfg = compose(config_name="config_base_instance_segmentation.yaml")
@@ -186,7 +203,7 @@ def main():
     transformer = ModelSpaceTransformer(cfg, device)
     data = transformer.prepare_pointcloud(type('M', (), {'vertices': coords, 'vertex_colors': colors})())
     
-    sam_labels_3d, sam_ids = load_sam_labels_3d(args.scene_id, args.frame_id, args.sam_folder)
+    sam_labels_3d, sam_ids = load_sam_labels_3d(args.scene_id, args.frame_id, input_path)
     model_masks = get_model_masks(cfg, model, data, transformer)
     
     merged_masks = select_and_merge_masks(
@@ -195,7 +212,8 @@ def main():
     )
     
     depth_mask = get_depth_mask(args.scene_id, args.frame_id)
-    map_to_2d_and_save(merged_masks, depth_mask, output_dir / "final_masks_2d.png")
+    output_path = Path(args.shared_folder) / f"{args.scene_id}_{args.frame_id}_i{iteration}_q3.png"
+    map_to_2d_and_save(merged_masks, depth_mask, output_path)
 
 
 if __name__ == "__main__":
