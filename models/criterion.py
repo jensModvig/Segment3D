@@ -249,8 +249,8 @@ class SetCriterion(nn.Module):
             target_mask = target_mask[:, point_idx].float()
             
             if "confidence" in targets[batch_id]:
-                target_confidence = targets[batch_id]["confidence"][target_id]
-                target_confidence = target_confidence[:, point_idx].float()
+                target_confidence = targets[batch_id]["confidence"]
+                target_confidence = target_confidence[point_idx].float()
                 
                 loss_masks.append(sigmoid_ce_loss_with_conf_jit(map, target_mask, num_masks, target_confidence))
                 loss_dices.append(dice_loss_with_conf_jit(map, target_mask, num_masks, target_confidence))

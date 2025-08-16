@@ -532,7 +532,7 @@ def get_instance_masks(
         target: List of dictionaries, each containing:
             - "labels": (N_instances_i,) - class labels for each instance
             - "masks": (N_instances_i, N_vox_i) - binary masks for each instance  
-            - "confidence": (N_instances_i, N_vox_i) - confidence masks for each instance - ALWAYS present
+            - "confidence": (N_vox_i,) - confidence per point per batch - ALWAYS present
             - "segment_mask": (N_instances_i, N_segments_i) - segment masks if segments provided
     """
     # Confidence must always be provided
@@ -543,12 +543,11 @@ def get_instance_masks(
 
     for batch_id in range(len(list_labels)):
         batch_labels = list_labels[batch_id]        # (N_vox, 3) - [semantic, instance, segment]
-        batch_confidence = confidences[batch_id].float()  # (N_vox, 1) - ALWAYS present
+        batch_confidence = confidences[batch_id].float().squeeze()  # (N_vox,) - ALWAYS present
         
         label_ids = []                              # List of class labels for each instance
         masks = []                                  # List of binary masks (N_vox,) for each instance
         segment_masks = []                          # List of segment masks (N_segments,) for each instance  
-        confidence_masks = []                       # List of confidence masks (N_vox,) for each instance
         
         # Get unique instance IDs in this batch
         instance_ids = batch_labels[:, 1].unique()  # (N_unique_instances,) - unique instance IDs
@@ -579,12 +578,6 @@ def get_instance_masks(
             label_ids.append(label_id)              # scalar
             masks.append(instance_points_mask)      # (N_vox,) - binary mask for this instance
             
-            # Create confidence mask for this instance - ALWAYS create
-            conf_mask = torch.zeros(batch_labels.shape[0], dtype=torch.float32)  # (N_vox,) - init to 0
-            instance_confidence = batch_confidence[instance_points_mask].squeeze().float()  # Convert to float32
-            conf_mask[instance_points_mask] = instance_confidence  # Fill instance points with their confidence
-            confidence_masks.append(conf_mask)  # (N_vox,) - confidence mask for this instance
-            
             # Handle segment masks if provided
             if list_segments:
                 # Get unique segment IDs for this instance
@@ -602,7 +595,6 @@ def get_instance_masks(
         # Stack all instance data for this batch
         label_ids = torch.stack(label_ids)          # (N_instances,) - class labels
         masks = torch.stack(masks)                  # (N_instances, N_vox) - binary masks
-        confidence_masks = torch.stack(confidence_masks)  # (N_instances, N_vox) - confidence masks - ALWAYS present
 
         if list_segments:
             segment_masks = torch.stack(segment_masks)  # (N_instances, N_segments) - segment masks
@@ -612,7 +604,6 @@ def get_instance_masks(
             new_label_ids = []
             new_masks = []
             new_segment_masks = []
-            new_confidence_masks = []
             
             # Group by unique class labels
             for label_id in label_ids.unique():
@@ -622,11 +613,6 @@ def get_instance_masks(
                 # Combine all instance masks of this class with logical OR
                 new_masks.append(masks[class_mask, :].sum(dim=0).bool())  # (N_vox,) - combined mask
                 
-                # For semantic segmentation, take max confidence across instances of same class
-                class_conf_mask = confidence_masks[class_mask, :]      # (N_class_instances, N_vox)
-                combined_conf_mask = class_conf_mask.max(dim=0)[0].float()  # (N_vox,) - max confidence per point
-                new_confidence_masks.append(combined_conf_mask)
-                
                 if list_segments:
                     # Combine segment masks with logical OR
                     new_segment_masks.append(segment_masks[class_mask, :].sum(dim=0).bool())  # (N_segments,)
@@ -634,7 +620,6 @@ def get_instance_masks(
             # Replace with merged data
             label_ids = torch.stack(new_label_ids)          # (N_classes,)
             masks = torch.stack(new_masks)                  # (N_classes, N_vox)
-            confidence_masks = torch.stack(new_confidence_masks)  # (N_classes, N_vox) - ALWAYS present
 
             if list_segments:
                 segment_masks = torch.stack(new_segment_masks)  # (N_classes, N_segments)
@@ -643,7 +628,7 @@ def get_instance_masks(
         target_dict = {
             "labels": torch.clamp(label_ids - label_offset, min=0),  # (N_instances,) - adjusted class labels
             "masks": masks,                                          # (N_instances, N_vox) - binary instance masks
-            "confidence": confidence_masks,                          # (N_instances, N_vox) - confidence masks - ALWAYS present
+            "confidence": batch_confidence,                          # (N_vox,) - confidence per point - ALWAYS present
         }
             
         if list_segments:
