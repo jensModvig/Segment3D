@@ -4,12 +4,13 @@ import torch
 from pathlib import Path
 from hydra.experimental import initialize, compose
 from demo_utils import get_model
-from datasets.scannetpp_stage1 import ScannetppStage1Dataset
+from datasets.stage1_conf import Stage1DatasetConf
 import albumentations as A
 import MinkowskiEngine as ME
 import cv2
 from PIL import Image
 import glob
+from cuml.cluster import DBSCAN
 
 
 class ModelSpaceTransformer:
@@ -54,18 +55,19 @@ def get_iteration_number(scene_id, frame_id, shared_folder):
     return max(iterations) + 1
 
 
-def load_sam_labels_3d(scene_id, frame_id, input_path):
+def load_sam_labels_3d(scene_id, frame_id, input_path, depth_resolution):
     data_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
-    depth_path = data_path / scene_id / 'iphone/depth' / f'{frame_id}.png'
+    depth_path = data_path / scene_id / f'depth_pro/depth_map_fpxc_{depth_resolution}' / f'{frame_id}.npz'
     
     if not depth_path.exists():
         raise FileNotFoundError(f"Depth file not found: {depth_path}")
     if not input_path.exists():
         raise FileNotFoundError(f"SAM file not found: {input_path}")
     
-    depth_image = cv2.imread(str(depth_path), -1)
+    depth_data = np.load(str(depth_path))
+    depth_image = depth_data['depth']
     sam_groups = cv2.resize(np.array(Image.open(input_path), dtype=np.int16), 
-                           (256, 192), interpolation=cv2.INTER_NEAREST)
+                           depth_image.shape[::-1], interpolation=cv2.INTER_NEAREST)
     
     sam_groups = sam_groups[depth_image != 0]
     
@@ -83,9 +85,10 @@ def load_sam_labels_3d(scene_id, frame_id, input_path):
     return sam_labels_3d, valid_sam_ids
 
 
-def get_depth_mask(scene_id, frame_id):
-    depth_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/') / scene_id / 'iphone/depth' / f'{frame_id}.png'
-    return (cv2.imread(str(depth_path), -1) != 0)
+def get_depth_mask(scene_id, frame_id, depth_resolution):
+    depth_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/') / scene_id / f'depth_pro/depth_map_fpxc_{depth_resolution}' / f'{frame_id}.npz'
+    depth_data = np.load(str(depth_path))
+    return (depth_data['depth'] != 0)
 
 
 def get_model_masks(cfg, model, data, transformer):
@@ -175,11 +178,38 @@ def map_to_2d_and_save(masks_3d, depth_mask, output_path):
     Image.fromarray(output_image.astype(np.uint16)).save(output_path)
 
 
+def apply_dbscan_clustering(masks_3d, coordinates, cfg):
+    if not masks_3d:
+        return masks_3d
+    
+    clustered_masks = []
+    for mask_3d in masks_3d:
+        mask_coords = coordinates[mask_3d > 0]
+        if len(mask_coords) < cfg.general.dbscan_min_points:
+            continue
+            
+        clusters = DBSCAN(
+            eps=cfg.general.dbscan_eps,
+            min_samples=cfg.general.dbscan_min_points
+        ).fit(mask_coords).labels_
+        
+        for cluster_id in np.unique(clusters):
+            if cluster_id != -1:
+                cluster_mask = np.zeros_like(mask_3d)
+                mask_indices = np.where(mask_3d > 0)[0]
+                cluster_points = mask_indices[clusters == cluster_id]
+                cluster_mask[cluster_points] = 1.0
+                clustered_masks.append(cluster_mask)
+    
+    return clustered_masks
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--scene_id", required=True)
     parser.add_argument("--frame_id", required=True)
+    parser.add_argument("--depth_resolution", required=True)
     parser.add_argument("--shared_folder", default="/work3/s173955/data/label_refinement")
     parser.add_argument("--sam_folder", default="sam")
     parser.add_argument("--selection_iou_threshold", type=float, default=0.001)
@@ -199,21 +229,40 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(cfg).eval().to(device)
     
-    coords, colors, _ = ScannetppStage1Dataset.load_specific_frame(args.scene_id, args.frame_id)
-    transformer = ModelSpaceTransformer(cfg, device)
-    data = transformer.prepare_pointcloud(type('M', (), {'vertices': coords, 'vertex_colors': colors})())
+    coords, colors, labels = Stage1DatasetConf.load_specific_frame(
+        args.scene_id, args.frame_id,
+        depth_folder=f'depth_pro/depth_map_fpxc_{args.depth_resolution}'
+    )
     
-    sam_labels_3d, sam_ids = load_sam_labels_3d(args.scene_id, args.frame_id, input_path)
+    confidence = labels[:, 3]
+    confidence_mask = confidence >= 0.5
+    coords_filtered = coords[confidence_mask]
+    colors_filtered = colors[confidence_mask]
+    
+    transformer = ModelSpaceTransformer(cfg, device)
+    data = transformer.prepare_pointcloud(type('M', (), {'vertices': coords_filtered, 'vertex_colors': colors_filtered})())
+    
+    sam_labels_3d, sam_ids = load_sam_labels_3d(args.scene_id, args.frame_id, input_path, args.depth_resolution)
+    sam_labels_3d_filtered = sam_labels_3d[confidence_mask]
+    
     model_masks = get_model_masks(cfg, model, data, transformer)
     
     merged_masks = select_and_merge_masks(
-        model_masks, sam_labels_3d, sam_ids, 
+        model_masks, sam_labels_3d_filtered, sam_ids, 
         args.selection_iou_threshold, args.merge_iou_threshold
     )
     
-    depth_mask = get_depth_mask(args.scene_id, args.frame_id)
+    clustered_masks = apply_dbscan_clustering(merged_masks, coords_filtered, cfg)
+    
+    clustered_masks_full = []
+    for mask in clustered_masks:
+        full_mask = np.zeros(len(coords), dtype=np.float32)
+        full_mask[confidence_mask] = mask
+        clustered_masks_full.append(full_mask)
+    
+    depth_mask = get_depth_mask(args.scene_id, args.frame_id, args.depth_resolution)
     output_path = Path(args.shared_folder) / f"{args.scene_id}_{args.frame_id}_i{iteration}_q3.png"
-    map_to_2d_and_save(merged_masks, depth_mask, output_path)
+    map_to_2d_and_save(clustered_masks_full, depth_mask, output_path)
 
 
 if __name__ == "__main__":
