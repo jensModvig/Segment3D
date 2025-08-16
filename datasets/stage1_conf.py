@@ -164,7 +164,7 @@ class Stage1DatasetConf(Dataset):
 
         # loading database files
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
-        self.resolution = '640x480'
+        self.resolution = '256x192'
 
         if data is not None:
             self._data = data
@@ -343,7 +343,7 @@ class Stage1DatasetConf(Dataset):
         confidence_image = depth_data['confidence']
         depth_dims = depth_image.shape[:2][::-1]
         
-        if self.resolution != f'{depth_dims[0]}x{depth_dims[1]}':
+        if self.resolution != f'{depth_dims[0]}x{depth_dims[1]}' and "train" in self.mode:
             raise ValueError('Wrong resolution')
         
         confidence = confidence_image.astype(np.float32) / 65535.0
@@ -367,8 +367,8 @@ class Stage1DatasetConf(Dataset):
         sam_groups = sam_groups[valid_depth_mask]
         confidence = confidence[valid_depth_mask]
         
-        # label low confidence as noise/unique label id
-        sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
+        # # label low confidence as noise/unique label id
+        # sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
 
         depth_shift = 1000.0
         x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
