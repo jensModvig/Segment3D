@@ -252,7 +252,8 @@ def main():
         args.selection_iou_threshold, args.merge_iou_threshold
     )
     
-    clustered_masks = apply_dbscan_clustering(merged_masks, coords_filtered, cfg)
+    # clustered_masks = apply_dbscan_clustering(merged_masks, coords_filtered, cfg)
+    clustered_masks = merged_masks
     
     clustered_masks_full = []
     for mask in clustered_masks:

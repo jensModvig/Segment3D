@@ -1,4 +1,4 @@
-- general.experiment_name=train_stage1_stage1conf_20250812_143713
+- general.experiment_name=train_stage1_stage1conf_20250817_133352
 - general.project_name=stage1conf
 - data/datasets=stage1_conf
 - data.scenes_to_exclude='00dd871005,c4c04e6d6c'
@@ -14,9 +14,8 @@
 - general.save_visualizations=False
 - general.gpus=2
 - model.num_queries=100
+- general.project_name=imgnt_snpp_conf
+- data/datasets=snpp_imgnt_stage1
 - optimizer.lr=0.0002
 - data.max_frames=76320
 - data.sam_folder=sam
-- data.color_folder=iphone/rgb
-- data.depth_folder=depth_pro/depth_map_fpxc_640x480
-- data.intrinsic_folder=depth_pro/intrinsics_fpxc_640x480

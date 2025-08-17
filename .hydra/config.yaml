@@ -15,9 +15,9 @@ general:
   export: false
   use_dbscan: false
   ignore_class_threshold: 100
-  project_name: stage1conf
+  project_name: imgnt_snpp_conf
   workspace: thesis
-  experiment_name: train_stage1_stage1conf_20250812_143713
+  experiment_name: train_stage1_stage1conf_20250817_133352
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -67,9 +67,9 @@ data:
   use_masks_th: 150
   use_masks_score: 0.6
   sam_folder: sam
-  color_folder: iphone/rgb
-  depth_folder: depth_pro/depth_map_fpxc_640x480
-  intrinsic_folder: depth_pro/intrinsics_fpxc_640x480
+  color_folder: not set
+  depth_folder: not set
+  intrinsic_folder: not set
   max_frames: 76320
   scenes_to_exclude: 00dd871005,c4c04e6d6c
   label_min_area: 0
@@ -92,7 +92,7 @@ data:
     num_workers: ${data.num_workers}
     batch_size: ${data.test_batch_size}
   train_dataset:
-    _target_: datasets.stage1_conf.Stage1DatasetConf
+    _target_: datasets.snpp_imgnt_stage1.Stage1DatasetConfImagenetMix
     dataset_name: scannetpp
     data_dir: data/processed
     image_augmentations_path: conf/augmentation/albumentations_aug.yaml
@@ -107,9 +107,6 @@ data:
     add_colors: ${data.add_colors}
     add_normals: ${data.add_normals}
     sam_folder: ${data.sam_folder}
-    color_folder: ${data.color_folder}
-    depth_folder: ${data.depth_folder}
-    intrinsic_folder: ${data.intrinsic_folder}
     add_instance: ${data.add_instance}
     instance_oversampling: 0.0
     place_around_existing: false
@@ -130,7 +127,7 @@ data:
     max_frames: ${data.max_frames}
     label_min_area: ${data.label_min_area}
   validation_dataset:
-    _target_: datasets.stage1_conf.Stage1DatasetConf
+    _target_: datasets.snpp_imgnt_stage1.Stage1DatasetConfImagenetMix
     dataset_name: scannetpp
     data_dir: data/processed
     image_augmentations_path: null
@@ -146,9 +143,6 @@ data:
     add_normals: ${data.add_normals}
     add_instance: ${data.add_instance}
     sam_folder: ${data.sam_folder}
-    color_folder: ${data.color_folder}
-    depth_folder: ${data.depth_folder}
-    intrinsic_folder: ${data.intrinsic_folder}
     cropping: false
     is_tta: false
     crop_min_size: ${data.crop_min_size}
@@ -159,7 +153,7 @@ data:
     max_frames: ${data.max_frames}
     label_min_area: ${data.label_min_area}
   test_dataset:
-    _target_: datasets.stage1_conf.Stage1DatasetConf
+    _target_: datasets.snpp_imgnt_stage1.Stage1DatasetConfImagenetMix
     dataset_name: scannetpp
     data_dir: data/processed
     image_augmentations_path: null
@@ -175,9 +169,6 @@ data:
     add_normals: ${data.add_normals}
     add_instance: ${data.add_instance}
     sam_folder: ${data.sam_folder}
-    color_folder: ${data.color_folder}
-    depth_folder: ${data.depth_folder}
-    intrinsic_folder: ${data.intrinsic_folder}
     cropping: false
     is_tta: false
     crop_min_size: ${data.crop_min_size}

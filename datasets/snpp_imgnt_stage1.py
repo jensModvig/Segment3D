@@ -30,15 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 
-class ScannetppStage1Dataset(Dataset):
+class Stage1DatasetConfImagenetMix(Dataset):
     def __init__(
         self,
-        dataset_name="scannetpp",
-        data_dir: Optional[Union[str, Tuple[str]]] = "data/processed/scannetpp",
+        dataset_name="scannetppimgnt",
+        data_dir: Optional[Union[str, Tuple[str]]] = "not set",
         label_db_filepath: Optional[
             str
-        ] = "configs/scannetpp_preprocessing/label_database.yaml",
-        sam_folder: Optional[str] = "sam",
+        ] = "not set",
+        sam_folder: Optional[str] = "not_set",
         scenes_to_exclude: str = "",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
@@ -158,14 +158,15 @@ class ScannetppStage1Dataset(Dataset):
 
         # loading database files
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
+        self.resolution = '640x480'
 
         if data is not None:
             self._data = data
         else:
             if self.mode == "train":
-                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train.txt')
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train_depth_{self.resolution}_filtered.txt')
             else:
-                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val.txt')
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val_depth_{self.resolution}_filtered.txt')
                 
             if not data_path.is_file():
                 raise FileNotFoundError(f'Cannot find {self.mode} file with {self.max_frames} max frames.')
@@ -174,7 +175,17 @@ class ScannetppStage1Dataset(Dataset):
                 self._data = scene_file.read().splitlines()
 
             exclude_set = set(scenes_to_exclude.split(',') if scenes_to_exclude else [])
-            self._data = [line for line in self._data if line.split()[0] not in exclude_set]
+            self._data = [f"scannet:{line}" for line in self._data if line.split()[0] not in exclude_set]
+            self._data = self._data[:8]
+
+            if "train" in self.mode:
+                from thes.paths import imagenet_processed_dir
+                imagenet_path = Path('/work3/s173955/Segment3D/data/processed/imagenet_info/imagenet_76k_images_depth_filtered.txt')
+                if not imagenet_path.is_file():
+                    raise FileNotFoundError(f'Cannot find ImageNet combined file: {imagenet_path}')
+                with open(imagenet_path, "r") as imagenet_file:
+                    imagenet_data = [f"imagenet:{line}" for line in imagenet_file.read().splitlines()]
+                self._data.extend(imagenet_data)
 
             if data_percent < 1.0:
                 self._data = sample(self._data, int(len(self._data) * data_percent))
@@ -182,19 +193,13 @@ class ScannetppStage1Dataset(Dataset):
 
         # augmentations
         self.volume_augmentations = V.NoOp()
-        if (volume_augmentations_path is not None) and (
-            volume_augmentations_path != "none"
-        ):
-            self.volume_augmentations = V.load(
-                Path(volume_augmentations_path), data_format="yaml"
-            )
+        if (volume_augmentations_path is not None) and (volume_augmentations_path != "none"):
+            self.volume_augmentations = V.load(Path(volume_augmentations_path), data_format="yaml")
+            
         self.image_augmentations = A.NoOp()
-        if (image_augmentations_path is not None) and (
-            image_augmentations_path != "none"
-        ):
-            self.image_augmentations = A.load(
-                Path(image_augmentations_path), data_format="yaml"
-            )
+        if (image_augmentations_path is not None) and (image_augmentations_path != "none"):
+            self.image_augmentations = A.load(Path(image_augmentations_path), data_format="yaml")
+            
         # mandatory color augmentation
         if add_colors:
             # use imagenet stats
@@ -205,10 +210,52 @@ class ScannetppStage1Dataset(Dataset):
         self.cache_data = cache_data
         if self.cache_data:
             raise ValueError('cache_data was apparently important')
+
+    def _load_imagenet_sample(self, class_name, image_stem):
+        from thes.paths import imagenet_raw_dir, imagenet_processed_dir
+        
+        depth_npz_path = imagenet_processed_dir / 'depth_map_fixed_focal' / class_name / f'{image_stem}.npz'
+        if not depth_npz_path.exists():
+            raise FileNotFoundError(f"ImageNet depth not found: {depth_npz_path}")
+        
+        depth_data = np.load(str(depth_npz_path))
+        depth_image = depth_data['depth']
+        confidence_image = depth_data['confidence']
+        depth_dims = depth_image.shape[:2][::-1]
+        
+        confidence = confidence_image.astype(np.float32) / 65535.0
+        
+        image_path = None
+        for split in ['train', 'val']:
+            candidate_path = imagenet_raw_dir / 'ILSVRC/Data/CLS-LOC' / split / class_name / f'{image_stem}.JPEG'
+            if candidate_path.exists():
+                image_path = candidate_path
+                break
+        
+        if not image_path:
+            raise FileNotFoundError(f"ImageNet RGB not found: {class_name}/{image_stem}.JPEG")
+        
+        color_image = cv2.imread(str(image_path))
+        color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        color_image = cv2.resize(color_image, depth_dims)
+
+        pose = np.eye(4)
+        depth_intrinsics = depth_data['intrinsics']
+
+        sam_path = Path('/work3/s173955/bigdata/processed/imagenet/sam_masks') / class_name / f"{image_stem}.png"
+        if not sam_path.exists():
+            raise FileNotFoundError(f"ImageNet SAM mask not found: {sam_path}")
+        
+        with open(sam_path, 'rb') as image_file:
+            img = Image.open(image_file)
+            sam_groups = np.array(img, dtype=np.int16)
+            sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
+
+        return depth_image, confidence, color_image, pose, depth_intrinsics, sam_groups, f'{class_name}/{image_stem}'
     
     @staticmethod  
     def load_specific_frame(scene_id, frame_id):
-        dataset = ScannetppStage1Dataset(
+        dataset = Stage1DatasetConfImagenetMix(
             mode="validation",
             point_per_cut=0,
             cropping=False,
@@ -222,7 +269,7 @@ class ScannetppStage1Dataset(Dataset):
             is_elastic_distortion=False,
             color_drop=0.0,
             sam_folder='gt_mask',
-            data=[f"{scene_id} {frame_id}"],
+            data=[f"scannet:{scene_id} {frame_id}"],
             hydra_config=None
         )
         
@@ -323,35 +370,57 @@ class ScannetppStage1Dataset(Dataset):
         if self.is_tta:
             idx = idx % len(self.data)
             
-        scannetpp_data = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
-        scannetpp_info_path = Path('/work3/s173955/Segment3D/data/processed/scannetpp_info/')
-        rgb_dims = (1920, 1440)
-        depth_dims = (256, 192)
-
         fname = self.data[idx]
-        scene_id, frame_id = fname.split()
+        data_type, content = fname.split(':', 1)
         
-        color_path = scannetpp_data / scene_id / 'iphone/rgb' / f'{frame_id}.jpg'
-        color_image = cv2.imread(str(color_path))
-        color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-        color_image = cv2.resize(color_image, depth_dims)
+        if data_type == "scannet":
+            scene_id, frame_id = content.split()
+            scannetpp_data = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
+            
+            depth_npz_path = scannetpp_data / scene_id / f'depth_pro/depth_map_fpxc_{self.resolution}' / f'{frame_id}.npz'
+            depth_data = np.load(str(depth_npz_path))
+            depth_image = depth_data['depth']
+            confidence_image = depth_data['confidence']
+            depth_dims = depth_image.shape[:2][::-1]
+            
+            if self.resolution != f'{depth_dims[0]}x{depth_dims[1]}' and "train" in self.mode:
+                raise ValueError('Wrong resolution')
+            
+            confidence = confidence_image.astype(np.float32) / 65535.0
+            
+            color_path = scannetpp_data / scene_id / 'iphone/rgb' / f'{frame_id}.jpg'
+            color_image = cv2.imread(str(color_path))
+            color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+            color_image = cv2.resize(color_image, depth_dims)
 
-        depth_path = scannetpp_data / scene_id / 'iphone/depth' / f'{frame_id}.png'        
-        depth_image = cv2.imread(str(depth_path), -1)
+            pose = depth_data['extrinsics']
+            depth_intrinsics = depth_data['intrinsics']
 
-        pose_intrinsic_data = np.load(scannetpp_info_path / 'poses' / scene_id / f'{frame_id}.npz')
-        pose = pose_intrinsic_data['pose']
-        color_intrinsics = pose_intrinsic_data['intrinsics']
+            sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
+            with open(sam_path, 'rb') as image_file:
+                img = Image.open(image_file)
+                sam_groups = np.array(img, dtype=np.int16)
+                sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
+            
+            identifier = f'{scene_id}/{frame_id}'
+            
+        elif data_type == "imagenet":
+            class_name, image_stem = content.split()
+            depth_image, confidence, color_image, pose, depth_intrinsics, sam_groups, identifier = self._load_imagenet_sample(class_name, image_stem)
+            depth_dims = depth_image.shape[:2][::-1]
+        else:
+            raise ValueError(f"Unknown data type: {data_type}")
 
-        sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
-        with open(sam_path, 'rb') as image_file:
-            img = Image.open(image_file)
-            sam_groups = np.array(img, dtype=np.int16)
-            sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
-
-        mask = (depth_image != 0)
-        colors = np.reshape(color_image[mask], [-1,3])
-        sam_groups = sam_groups[mask]
+        valid_depth_mask = (depth_image != 0)
+        if not valid_depth_mask.any():
+            raise ValueError(f'Invalid frame {identifier} contains no depth after filtering.')
+        
+        colors = np.reshape(color_image[valid_depth_mask], [-1,3])
+        sam_groups = sam_groups[valid_depth_mask]
+        confidence = confidence[valid_depth_mask]
+        
+        # # label low confidence as noise/unique label id
+        # sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
 
         depth_shift = 1000.0
         x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
@@ -362,12 +431,10 @@ class ScannetppStage1Dataset(Dataset):
         uv_depth = np.reshape(uv_depth, [-1,3])
         uv_depth = uv_depth[np.where(uv_depth[:,2]!=0),:].squeeze()
         
-        scales = np.array([depth_dims[0]/rgb_dims[0], depth_dims[1]/rgb_dims[1], 1])
-        depth_intrinsic = color_intrinsics * scales[:, None]
-        fx = depth_intrinsic[0,0]
-        fy = depth_intrinsic[1,1]
-        cx = depth_intrinsic[0,2]
-        cy = depth_intrinsic[1,2]
+        fx = depth_intrinsics[0,0]
+        fy = depth_intrinsics[1,1]
+        cx = depth_intrinsics[0,2]
+        cy = depth_intrinsics[1,2]
         n = uv_depth.shape[0]
         points = np.ones((n,4))
         X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx
@@ -376,22 +443,29 @@ class ScannetppStage1Dataset(Dataset):
         points[:,1] = Y
         points[:,2] = uv_depth[:,2]
         points_world = np.dot(points, np.transpose(pose))
-        sam_groups = self.num_to_natural(sam_groups)
+        sam_groups = self.num_to_natural(sam_groups) # (N,)
 
         if self.label_min_area != 0:
             counts = Counter(sam_groups)
             for num, count in counts.items():
                 if count < self.label_min_area:
                     sam_groups[sam_groups == num] = -1
-            sam_groups = self.num_to_natural(sam_groups)
+            sam_groups = self.num_to_natural(sam_groups) # (N,)
         if np.all(sam_groups == -1):
-            raise ValueError(f'Invalid frame {scene_id}/{frame_id} contains no groups after filtering.')
+            raise ValueError(f'Invalid frame {identifier} contains no groups after filtering.')
 
         coordinates = points_world[:,:3]
         color = colors
         normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
-        labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
+        labels = np.concatenate(
+            [
+                np.zeros(coordinates.shape[0]).reshape(-1, 1), # (N, 1)
+                sam_groups.reshape(-1, 1) # (N, 1)
+            ],
+            axis=1
+        ) # (N, 2) (zeros, sam_labels)
+        confidence = confidence.reshape(-1, 1) # (N, 1)
 
         raw_coordinates = coordinates.copy()
         raw_color = color
@@ -416,6 +490,7 @@ class ScannetppStage1Dataset(Dataset):
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
                 points = points[new_idx]
+                confidence = confidence[new_idx]
 
             coordinates -= coordinates.mean(0)
             try:
@@ -485,12 +560,11 @@ class ScannetppStage1Dataset(Dataset):
                     indexes = crop(
                         coordinates, x_min, y_min, z_min, x_max, y_max, z_max
                     )
-                    coordinates, normals, color, labels = (
-                        coordinates[~indexes],
-                        normals[~indexes],
-                        color[~indexes],
-                        labels[~indexes],
-                    )
+                    coordinates = coordinates[~indexes]
+                    normals = normals[~indexes]
+                    color = color[~indexes]
+                    labels = labels[~indexes]
+                    confidence = confidence[~indexes]
 
             # if self.noise_rate > 0:
             #     coordinates, color, normals, labels = random_points(
@@ -574,6 +648,7 @@ class ScannetppStage1Dataset(Dataset):
                             np.full_like(unlabeled_labels, self.ignore_label),
                         )
                     )
+                    confidence = np.concatenate((confidence, np.zeros(len(unlabeled_coords))))
 
             if random() < self.color_drop:
                 color[:] = 255
@@ -582,32 +657,32 @@ class ScannetppStage1Dataset(Dataset):
         pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
         color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
         # prepare labels and map from 0 to 20(40)
-        labels = labels.astype(np.int32)
-        labels = np.hstack((labels, segments[..., None].astype(np.int32)))
+        labels = labels.astype(np.int32) # (N, 2) (zeros, sam_labels)
+        labels = np.hstack((labels, segments[..., None].astype(np.int32))) # (N, 3) (zeros, sam_labels, segments/ones)
 
-        features = color
+        features = color # (N, 3)
         if self.add_normals:
-            features = np.hstack((features, normals))
+            features = np.hstack((features, normals)) # never executed
         if self.add_raw_coordinates:
             if len(features.shape) == 1:
                 features = np.hstack((features[None, ...], coordinates))
             else:
-                features = np.hstack((features, coordinates))
+                features = np.hstack((features, coordinates)) # (N, 6)
         
-        # Default confidence to 1, to get same calculation as the original
-        labels = np.hstack((labels, np.ones((labels.shape[0], 1))))
+        labels = np.hstack((labels, confidence)) # (N, 4) (zeros, sam_labels, segments/ones, confidences)
+        
         
         return (
-            coordinates,
-            features,
-            labels,
-            f'{scene_id}/{frame_id}',
+            coordinates, # (N, 3)
+            features, # (N, 6), (color, raw_coords)
+            labels, # (N, 4) (zeros, sam_labels, segments/ones, confidences)
+            identifier,
             raw_color,
             raw_normals,
             raw_coordinates,
             idx,
         )
-
+        
 
     @property
     def data(self):

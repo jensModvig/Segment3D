@@ -164,7 +164,7 @@ class Stage1DatasetConf(Dataset):
 
         # loading database files
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
-        self.resolution = '256x192'
+        self.resolution = '640x480'
 
         if data is not None:
             self._data = data
