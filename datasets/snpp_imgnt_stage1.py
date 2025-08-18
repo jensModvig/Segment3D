@@ -20,7 +20,7 @@ import yaml
 import cv2
 import copy
 import time
-
+import datetime
 
 # from yaml import CLoader as Loader
 from torch.utils.data import Dataset
@@ -176,11 +176,11 @@ class Stage1DatasetConfImagenetMix(Dataset):
 
             exclude_set = set(scenes_to_exclude.split(',') if scenes_to_exclude else [])
             self._data = [f"scannet:{line}" for line in self._data if line.split()[0] not in exclude_set]
-            self._data = self._data[:8]
 
             if "train" in self.mode:
                 from thes.paths import imagenet_processed_dir
-                imagenet_path = Path('/work3/s173955/Segment3D/data/processed/imagenet_info/imagenet_76k_images_depth_filtered.txt')
+                # imagenet_path = Path('/work3/s173955/Segment3D/data/processed/imagenet_info/imagenet_debug.txt')
+                imagenet_path = Path('/work3/s173955/Segment3D/data/processed/imagenet_info/imagenet_76k_images_depth_size_filtered.txt')
                 if not imagenet_path.is_file():
                     raise FileNotFoundError(f'Cannot find ImageNet combined file: {imagenet_path}')
                 with open(imagenet_path, "r") as imagenet_file:
@@ -406,6 +406,8 @@ class Stage1DatasetConfImagenetMix(Dataset):
             
         elif data_type == "imagenet":
             class_name, image_stem = content.split()
+            # with open(f'/work3/s173955/debug_logs/imagenet_debug_{os.getpid()}.log', 'a') as f:
+            #     f.write(f"{datetime.datetime.now().isoformat()} {class_name}/{image_stem}\n")
             depth_image, confidence, color_image, pose, depth_intrinsics, sam_groups, identifier = self._load_imagenet_sample(class_name, image_stem)
             depth_dims = depth_image.shape[:2][::-1]
         else:
@@ -455,6 +457,12 @@ class Stage1DatasetConfImagenetMix(Dataset):
             raise ValueError(f'Invalid frame {identifier} contains no groups after filtering.')
 
         coordinates = points_world[:,:3]
+        extent = coordinates.max(0) - coordinates.min(0)
+        if np.all(extent <= 0.32):
+            print(f'Warning {identifier} is very small {extent}, could cause a single point after pooling.')
+            with open(f'/work3/s173955/debug_logs/imagenet_debug_{os.getpid()}.log', 'a') as f:
+                f.write(f"{datetime.datetime.now().isoformat()} {extent} {identifier}\n")
+        
         color = colors
         normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
