@@ -19,6 +19,7 @@ import volumentations as V
 import yaml
 import cv2
 import copy
+import time
 
 
 # from yaml import CLoader as Loader
@@ -27,17 +28,20 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 
-class SemanticSegmentationDataset(Dataset):
-    """Docstring for SemanticSegmentationDataset."""
 
+
+class Stage1DatasetConf(Dataset):
     def __init__(
         self,
-        dataset_name="scannet",
-        data_dir: Optional[Union[str, Tuple[str]]] = "data/processed/scannet",
+        dataset_name="scannetpp",
+        data_dir: Optional[Union[str, Tuple[str]]] = "data/processed/scannetpp",
         label_db_filepath: Optional[
             str
-        ] = "configs/scannet_preprocessing/label_database.yaml",
-        sam_folder: Optional[str] = "sam",
+        ] = "configs/scannetpp_preprocessing/label_database.yaml",
+        sam_folder: Optional[str] = "not_set",
+        color_folder: Optional[str] = "not_set",
+        depth_folder: Optional[str] = "not_set",
+        intrinsic_folder: Optional[str] = "not_set",
         scenes_to_exclude: str = "",
         # mean std values from scannet
         color_mean_std: Optional[Union[str, Tuple[Tuple[float]]]] = (
@@ -79,21 +83,25 @@ class SemanticSegmentationDataset(Dataset):
         add_clip=False,
         is_elastic_distortion=True,
         color_drop=0.0,
-        max_frames: Optional[int] = None,
-        hydra_config = None
+        max_frames = None,
+        data: Optional[List[str]] = None,
+        label_min_area=0,
+        hydra_config = None,
     ):
         assert task in [
             "instance_segmentation",
             "semantic_segmentation",
         ], "unknown task"
 
+        self.hydra_config = hydra_config
         self.add_clip = add_clip
         self.dataset_name = dataset_name
         self.is_elastic_distortion = is_elastic_distortion
         self.color_drop = color_drop
         self.max_frames = max_frames
+        self.label_min_area = label_min_area
 
-        if self.dataset_name == "scannet":
+        if self.dataset_name == "scannetpp":
             self.color_map = {0: [0, 255, 0]}
         else:
             assert False, "dataset not known"
@@ -113,6 +121,9 @@ class SemanticSegmentationDataset(Dataset):
         self.is_tta = is_tta
         self.on_crops = on_crops
         self.sam_folder = sam_folder
+        self.color_folder = color_folder  # Store the new parameters
+        self.depth_folder = depth_folder
+        self.intrinsic_folder = intrinsic_folder
 
         # Handle scenes to exclude
         self.excluded_scenes = set()
@@ -152,49 +163,39 @@ class SemanticSegmentationDataset(Dataset):
         self.resample_points = resample_points
 
         # loading database files
-        self._data = []
         self._labels = {0: {'color': [0, 255, 0], 'name': 'object', 'validation': True}}
+        self.resolution = '640x480'
 
-        if self.mode == "train":
-            data_path = f'data/processed/scannet_info/scannet_train.txt'
+        if data is not None:
+            self._data = data
         else:
-            data_path = f'data/processed/scannet_info/scannet_val.txt'
-        with open(data_path, "r") as scene_file:
-            self._data = scene_file.read().splitlines()
+            if self.mode == "train":
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_train_depth_{self.resolution}_filtered.txt')
+            else:
+                data_path = Path(f'data/processed/scannetpp_info/scannetpp_{self.max_frames}_val_depth_{self.resolution}_filtered.txt')
+                
+            if not data_path.is_file():
+                raise FileNotFoundError(f'Cannot find {self.mode} file with {self.max_frames} max frames.')
+                
+            with open(data_path, "r") as scene_file:
+                self._data = scene_file.read().splitlines()
 
-        # Filter out excluded scenes
-        if self.excluded_scenes:
-            original_count = len(self._data)
-            self._data = [item for item in self._data if not any(excluded_scene in item for excluded_scene in self.excluded_scenes)]
-            print(f'Filtered dataset: {original_count} -> {len(self._data)} items after excluding scenes')
+            exclude_set = set(scenes_to_exclude.split(',') if scenes_to_exclude else [])
+            self._data = [line for line in self._data if line.split()[0] not in exclude_set]
 
-        if data_percent < 1.0:
-            self._data = sample(
-                self._data, int(len(self._data) * data_percent)
-            )
+            if data_percent < 1.0:
+                self._data = sample(self._data, int(len(self._data) * data_percent))
         
-        # Apply max_frames limit if specified
-        if self.max_frames and len(self._data) > self.max_frames:
-            self._data = self._data[:self.max_frames]
-            print(f'Limited dataset to {self.max_frames} frames')
-        
-        self.depth_intrinsic = np.loadtxt('data/processed/scannet_info/intrinsics.txt')
 
         # augmentations
         self.volume_augmentations = V.NoOp()
-        if (volume_augmentations_path is not None) and (
-            volume_augmentations_path != "none"
-        ):
-            self.volume_augmentations = V.load(
-                Path(volume_augmentations_path), data_format="yaml"
-            )
+        if (volume_augmentations_path is not None) and (volume_augmentations_path != "none"):
+            self.volume_augmentations = V.load(Path(volume_augmentations_path), data_format="yaml")
+            
         self.image_augmentations = A.NoOp()
-        if (image_augmentations_path is not None) and (
-            image_augmentations_path != "none"
-        ):
-            self.image_augmentations = A.load(
-                Path(image_augmentations_path), data_format="yaml"
-            )
+        if (image_augmentations_path is not None) and (image_augmentations_path != "none"):
+            self.image_augmentations = A.load(Path(image_augmentations_path), data_format="yaml")
+            
         # mandatory color augmentation
         if add_colors:
             # use imagenet stats
@@ -203,75 +204,38 @@ class SemanticSegmentationDataset(Dataset):
             self.normalize_color = A.Normalize(mean=color_mean, std=color_std)
 
         self.cache_data = cache_data
-        # new_data = []
         if self.cache_data:
-            new_data = []
-            for i in range(len(self._data)):
-                self._data[i]["data"] = np.load(
-                    self.data[i]["filepath"].replace("../../", "")
-                )
-                if self.on_crops:
-                    if self.eval_inner_core == -1:
-                        for block_id, block in enumerate(
-                            self.splitPointCloud(self._data[i]["data"])
-                        ):
-                            if len(block) > 10000:
-                                new_data.append(
-                                    {
-                                        "instance_gt_filepath": self._data[i][
-                                            "instance_gt_filepath"
-                                        ][block_id]
-                                        if len(
-                                            self._data[i][
-                                                "instance_gt_filepath"
-                                            ]
-                                        )
-                                        > 0
-                                        else list(),
-                                        "scene": f"{self._data[i]['scene'].replace('.txt', '')}_{block_id}.txt",
-                                        "raw_filepath": f"{self.data[i]['filepath'].replace('.npy', '')}_{block_id}",
-                                        "data": block,
-                                    }
-                                )
-                            else:
-                                assert False
-                    else:
-                        conds_inner, blocks_outer = self.splitPointCloud(
-                            self._data[i]["data"],
-                            size=self.crop_length,
-                            inner_core=self.eval_inner_core,
-                        )
-
-                        for block_id in range(len(conds_inner)):
-                            cond_inner = conds_inner[block_id]
-                            block_outer = blocks_outer[block_id]
-
-                            if cond_inner.sum() > 10000:
-                                new_data.append(
-                                    {
-                                        "instance_gt_filepath": self._data[i][
-                                            "instance_gt_filepath"
-                                        ][block_id]
-                                        if len(
-                                            self._data[i][
-                                                "instance_gt_filepath"
-                                            ]
-                                        )
-                                        > 0
-                                        else list(),
-                                        "scene": f"{self._data[i]['scene'].replace('.txt', '')}_{block_id}.txt",
-                                        "raw_filepath": f"{self.data[i]['filepath'].replace('.npy', '')}_{block_id}",
-                                        "data": block_outer,
-                                        "cond_inner": cond_inner,
-                                    }
-                                )
-                            else:
-                                assert False
-
-            if self.on_crops:
-                self._data = new_data
-                # new_data.append(np.load(self.data[i]["filepath"].replace("../../", "")))
-            # self._data = new_data
+            raise ValueError('cache_data was apparently important')
+    
+    @staticmethod  
+    def load_specific_frame(scene_id, frame_id,
+                            sam_folder='gt_mask',
+                            color_folder='iphone/rgb',
+                            depth_folder='iphone/depth',
+                            intrinsic_folder='not_set'):
+        dataset = Stage1DatasetConf(
+            mode="validation",
+            point_per_cut=0,
+            cropping=False,
+            is_tta=False,
+            scenes_to_exclude="00dd871005,c4c04e6d6c",
+            image_augmentations_path=None,
+            volume_augmentations_path=None,
+            noise_rate=0,
+            resample_points=0,
+            flip_in_center=False,
+            is_elastic_distortion=False,
+            color_drop=0.0,
+            sam_folder=sam_folder,
+            color_folder=color_folder,
+            depth_folder=depth_folder,
+            intrinsic_folder=intrinsic_folder,
+            data=[f"{scene_id} {frame_id}"],
+            hydra_config=None
+        )
+        
+        sample = dataset[0]
+        return sample[0], sample[4], sample[2]
 
     def get_raw_sample(self, idx):
         """Get raw sample without augmentations for debugging."""
@@ -366,30 +330,45 @@ class SemanticSegmentationDataset(Dataset):
         idx = idx % len(self.data)
         if self.is_tta:
             idx = idx % len(self.data)
+            
+        scannetpp_data = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
+        scannetpp_info_path = Path('/work3/s173955/Segment3D/data/processed/scannetpp_info/')
+        rgb_dims = (1920, 1440)
 
         fname = self.data[idx]
-        scene_id, image_id = fname.split()
-        color_path = os.path.join(self.data_dir, 'scannet', scene_id, 'color', image_id + '.jpg')
-        color_image = cv2.imread(color_path)
+        scene_id, frame_id = fname.split()
+        depth_npz_path = scannetpp_data / scene_id / self.depth_folder / f'{frame_id}.npz'
+        depth_data = np.load(str(depth_npz_path))
+        depth_image = depth_data['depth']
+        confidence_image = depth_data['confidence']
+        depth_dims = depth_image.shape[:2][::-1]
+        
+        if self.resolution != f'{depth_dims[0]}x{depth_dims[1]}' and "train" in self.mode:
+            raise ValueError('Wrong resolution')
+        
+        confidence = confidence_image.astype(np.float32) / 65535.0
+        
+        color_path = scannetpp_data / scene_id / self.color_folder / f'{frame_id}.jpg'
+        color_image = cv2.imread(str(color_path))
         color_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
-        color_image = cv2.resize(color_image, (640, 480))
+        color_image = cv2.resize(color_image, depth_dims)
 
-        depth_path = os.path.join(self.data_dir, 'scannet', scene_id, 'depth', image_id + '.png')
-        depth_image = cv2.imread(depth_path, -1)
+        pose = depth_data['extrinsics']
+        depth_intrinsics = depth_data['intrinsics']
 
-        pose_path = os.path.join(self.data_dir, 'scannet', scene_id, 'pose', str(int(image_id))+ '.txt')
-        pose = np.loadtxt(pose_path)
-
-        depth_intrinsic = self.depth_intrinsic
-
-        sam_path = os.path.join(self.data_dir, 'scannet', scene_id, self.sam_folder, f'{image_id}.png')
+        sam_path = scannetpp_data / scene_id / self.sam_folder / f"{frame_id}.png"
         with open(sam_path, 'rb') as image_file:
             img = Image.open(image_file)
             sam_groups = np.array(img, dtype=np.int16)
+            sam_groups = cv2.resize(sam_groups, depth_dims, interpolation=cv2.INTER_NEAREST)
 
-        mask = (depth_image != 0)
-        colors = np.reshape(color_image[mask], [-1,3])
-        sam_groups = sam_groups[mask]
+        valid_depth_mask = (depth_image != 0)
+        colors = np.reshape(color_image[valid_depth_mask], [-1,3])
+        sam_groups = sam_groups[valid_depth_mask]
+        confidence = confidence[valid_depth_mask]
+        
+        # # label low confidence as noise/unique label id
+        # sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
 
         depth_shift = 1000.0
         x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
@@ -400,33 +379,41 @@ class SemanticSegmentationDataset(Dataset):
         uv_depth = np.reshape(uv_depth, [-1,3])
         uv_depth = uv_depth[np.where(uv_depth[:,2]!=0),:].squeeze()
         
-        fx = depth_intrinsic[0,0]
-        fy = depth_intrinsic[1,1]
-        cx = depth_intrinsic[0,2]
-        cy = depth_intrinsic[1,2]
-        bx = depth_intrinsic[0,3]
-        by = depth_intrinsic[1,3]
+        fx = depth_intrinsics[0,0]
+        fy = depth_intrinsics[1,1]
+        cx = depth_intrinsics[0,2]
+        cy = depth_intrinsics[1,2]
         n = uv_depth.shape[0]
         points = np.ones((n,4))
-        X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx + bx
-        Y = (uv_depth[:,1]-cy)*uv_depth[:,2]/fy + by
+        X = (uv_depth[:,0]-cx)*uv_depth[:,2]/fx
+        Y = (uv_depth[:,1]-cy)*uv_depth[:,2]/fy
         points[:,0] = X
         points[:,1] = Y
         points[:,2] = uv_depth[:,2]
         points_world = np.dot(points, np.transpose(pose))
-        sam_groups = self.num_to_natural(sam_groups)
+        sam_groups = self.num_to_natural(sam_groups) # (N,)
 
-        counts = Counter(sam_groups)
-        for num, count in counts.items():
-            if count < 100:
-                sam_groups[sam_groups == num] = -1
-        sam_groups = self.num_to_natural(sam_groups)
+        if self.label_min_area != 0:
+            counts = Counter(sam_groups)
+            for num, count in counts.items():
+                if count < self.label_min_area:
+                    sam_groups[sam_groups == num] = -1
+            sam_groups = self.num_to_natural(sam_groups) # (N,)
+        if np.all(sam_groups == -1):
+            raise ValueError(f'Invalid frame {scene_id}/{frame_id} contains no groups after filtering.')
 
         coordinates = points_world[:,:3]
         color = colors
         normals = np.ones_like(coordinates)
         segments = np.ones(coordinates.shape[0])
-        labels = np.concatenate([np.zeros(coordinates.shape[0]).reshape(-1, 1), sam_groups.reshape(-1, 1)], axis=1)
+        labels = np.concatenate(
+            [
+                np.zeros(coordinates.shape[0]).reshape(-1, 1), # (N, 1)
+                sam_groups.reshape(-1, 1) # (N, 1)
+            ],
+            axis=1
+        ) # (N, 2) (zeros, sam_labels)
+        confidence = confidence.reshape(-1, 1) # (N, 1)
 
         raw_coordinates = coordinates.copy()
         raw_color = color
@@ -451,13 +438,11 @@ class SemanticSegmentationDataset(Dataset):
                 raw_normals = raw_normals[new_idx]
                 normals = normals[new_idx]
                 points = points[new_idx]
+                confidence = confidence[new_idx]
 
             coordinates -= coordinates.mean(0)
             try:
-                coordinates += (
-                    np.random.uniform(coordinates.min(0), coordinates.max(0))
-                    / 2
-                )
+                coordinates += (np.random.uniform(coordinates.min(0), coordinates.max(0)) / 2)
             except OverflowError as err:
                 print(coordinates)
                 print(coordinates.shape)
@@ -523,12 +508,11 @@ class SemanticSegmentationDataset(Dataset):
                     indexes = crop(
                         coordinates, x_min, y_min, z_min, x_max, y_max, z_max
                     )
-                    coordinates, normals, color, labels = (
-                        coordinates[~indexes],
-                        normals[~indexes],
-                        color[~indexes],
-                        labels[~indexes],
-                    )
+                    coordinates = coordinates[~indexes]
+                    normals = normals[~indexes]
+                    color = color[~indexes]
+                    labels = labels[~indexes]
+                    confidence = confidence[~indexes]
 
             # if self.noise_rate > 0:
             #     coordinates, color, normals, labels = random_points(
@@ -612,6 +596,7 @@ class SemanticSegmentationDataset(Dataset):
                             np.full_like(unlabeled_labels, self.ignore_label),
                         )
                     )
+                    confidence = np.concatenate((confidence, np.zeros(len(unlabeled_coords))))
 
             if random() < self.color_drop:
                 color[:] = 255
@@ -620,31 +605,32 @@ class SemanticSegmentationDataset(Dataset):
         pseudo_image = color.astype(np.uint8)[np.newaxis, :, :]
         color = np.squeeze(self.normalize_color(image=pseudo_image)["image"])
         # prepare labels and map from 0 to 20(40)
-        labels = labels.astype(np.int32)
-        labels = np.hstack((labels, segments[..., None].astype(np.int32)))
+        labels = labels.astype(np.int32) # (N, 2) (zeros, sam_labels)
+        labels = np.hstack((labels, segments[..., None].astype(np.int32))) # (N, 3) (zeros, sam_labels, segments/ones)
 
-        features = color
+        features = color # (N, 3)
         if self.add_normals:
-            features = np.hstack((features, normals))
+            features = np.hstack((features, normals)) # never executed
         if self.add_raw_coordinates:
             if len(features.shape) == 1:
                 features = np.hstack((features[None, ...], coordinates))
             else:
-                features = np.hstack((features, coordinates))
-
-        # Default confidence to 1, to get same calculation as the original
-        labels = np.hstack((labels, np.ones((labels.shape[0], 1))))
-
+                features = np.hstack((features, coordinates)) # (N, 6)
+        
+        labels = np.hstack((labels, confidence)) # (N, 4) (zeros, sam_labels, segments/ones, confidences)
+        
+        
         return (
-            coordinates,
-            features,
-            labels,
-            f'{scene_id}/{image_id}',
+            coordinates, # (N, 3)
+            features, # (N, 6), (color, raw_coords)
+            labels, # (N, 4) (zeros, sam_labels, segments/ones, confidences)
+            f'{scene_id}/{frame_id}',
             raw_color,
             raw_normals,
             raw_coordinates,
             idx,
         )
+        
 
     @property
     def data(self):

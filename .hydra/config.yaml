@@ -17,7 +17,7 @@ general:
   ignore_class_threshold: 100
   project_name: imgnt_snpp_conf
   workspace: thesis
-  experiment_name: train_stage1_stage1conf_20250817_133352
+  experiment_name: train_stage1_stage1conf_20250818_132327
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -279,7 +279,7 @@ metrics:
   ignore_label: ${data.ignore_label}
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 0.0002
+  lr: 2.0e-05
 scheduler:
   scheduler:
     _target_: torch.optim.lr_scheduler.OneCycleLR

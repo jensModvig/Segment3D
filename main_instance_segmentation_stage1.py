@@ -44,9 +44,7 @@ def get_parameters(cfg: DictConfig):
     else:
         print("EXPERIMENT ALREADY EXIST")
         if os.path.isfile(f"{cfg.general.save_dir}/last-epoch.ckpt"):
-            cfg["trainer"][
-                "resume_from_checkpoint"
-            ] = f"{cfg.general.save_dir}/last-epoch.ckpt"
+            cfg["trainer"]["resume_from_checkpoint"] = f"{cfg.general.save_dir}/last-epoch.ckpt"
 
     for log in cfg.logging:
         loggers.append(hydra.utils.instantiate(log))
