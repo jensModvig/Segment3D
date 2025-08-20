@@ -2,7 +2,7 @@ general:
   train_mode: true
   task: instance_segmentation
   seed: null
-  checkpoint: null
+  checkpoint: checkpoints/ctoSAM_e20_train_stage1_20250622_221823.ckpt
   backbone_checkpoint: null
   freeze_backbone: false
   linear_probing_backbone: false
@@ -15,9 +15,9 @@ general:
   export: false
   use_dbscan: false
   ignore_class_threshold: 100
-  project_name: imgnt_snpp_conf
-  workspace: thesis
-  experiment_name: train_stage1_stage1conf_20250818_132327
+  project_name: train2_scannet
+  workspace: jonasschult
+  experiment_name: train2_20250820_153106
   num_targets: 19
   add_instance: true
   dbscan_eps: 0.95
@@ -29,11 +29,11 @@ general:
   iou_threshold: 1.0
   area: 5
   eval_inner_core: -1
-  topk_per_image: 100
+  topk_per_image: -1
   ignore_mask_idx: []
   max_batch_size: 99999999
   save_dir: saved/${general.experiment_name}
-  gpus: 2
+  gpus: 4
 data:
   train_mode: train
   validation_mode: validation
@@ -47,8 +47,8 @@ data:
   add_instance: ${general.add_instance}
   task: ${general.task}
   pin_memory: false
-  num_workers: 4
-  batch_size: 8
+  num_workers: 2
+  batch_size: 2
   test_batch_size: 1
   cache_data: false
   voxel_size: 0.02
@@ -70,9 +70,9 @@ data:
   color_folder: not set
   depth_folder: not set
   intrinsic_folder: not set
-  max_frames: 76320
-  scenes_to_exclude: 00dd871005,c4c04e6d6c
-  label_min_area: 0
+  max_frames: null
+  scenes_to_exclude: ''
+  label_min_area: 100
   train_dataloader:
     _target_: torch.utils.data.DataLoader
     shuffle: true
@@ -92,13 +92,13 @@ data:
     num_workers: ${data.num_workers}
     batch_size: ${data.test_batch_size}
   train_dataset:
-    _target_: datasets.snpp_imgnt_stage1.Stage1DatasetConfImagenetMix
-    dataset_name: scannetpp
-    data_dir: data/processed
+    _target_: datasets.scannet_stage2.SemanticSegmentationDataset
+    dataset_name: scannet
+    data_dir: data/processed/scannet200
     image_augmentations_path: conf/augmentation/albumentations_aug.yaml
     volume_augmentations_path: conf/augmentation/volumentations_aug.yaml
-    label_db_filepath: data/processed/scannetpp/label_database.yaml
-    color_mean_std: data/processed/scannetpp/color_mean_std.yaml
+    label_db_filepath: data/processed/scannet200/label_database.yaml
+    color_mean_std: data/processed/scannet200/color_mean_std.yaml
     data_percent: 1.0
     mode: ${data.train_mode}
     ignore_label: ${data.ignore_label}
@@ -106,7 +106,6 @@ data:
     add_raw_coordinates: ${data.add_raw_coordinates}
     add_colors: ${data.add_colors}
     add_normals: ${data.add_normals}
-    sam_folder: ${data.sam_folder}
     add_instance: ${data.add_instance}
     instance_oversampling: 0.0
     place_around_existing: false
@@ -123,17 +122,14 @@ data:
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
-    scenes_to_exclude: ${data.scenes_to_exclude}
-    max_frames: ${data.max_frames}
-    label_min_area: ${data.label_min_area}
   validation_dataset:
-    _target_: datasets.snpp_imgnt_stage1.Stage1DatasetConfImagenetMix
-    dataset_name: scannetpp
-    data_dir: data/processed
+    _target_: datasets.scannet_stage2.SemanticSegmentationDataset
+    dataset_name: scannet
+    data_dir: data/processed/scannet200
     image_augmentations_path: null
     volume_augmentations_path: null
-    label_db_filepath: data/processed/scannetpp/label_database.yaml
-    color_mean_std: data/processed/scannetpp/color_mean_std.yaml
+    label_db_filepath: data/processed/scannet200/label_database.yaml
+    color_mean_std: data/processed/scannet200/color_mean_std.yaml
     data_percent: 1.0
     mode: ${data.validation_mode}
     ignore_label: ${data.ignore_label}
@@ -142,24 +138,20 @@ data:
     add_colors: ${data.add_colors}
     add_normals: ${data.add_normals}
     add_instance: ${data.add_instance}
-    sam_folder: ${data.sam_folder}
     cropping: false
     is_tta: false
     crop_min_size: ${data.crop_min_size}
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
-    scenes_to_exclude: ${data.scenes_to_exclude}
-    max_frames: ${data.max_frames}
-    label_min_area: ${data.label_min_area}
   test_dataset:
-    _target_: datasets.snpp_imgnt_stage1.Stage1DatasetConfImagenetMix
-    dataset_name: scannetpp
-    data_dir: data/processed
+    _target_: datasets.scannet_stage2.SemanticSegmentationDataset
+    dataset_name: scannet
+    data_dir: data/processed/scannet200
     image_augmentations_path: null
     volume_augmentations_path: null
-    label_db_filepath: data/processed/scannetpp/label_database.yaml
-    color_mean_std: data/processed/scannetpp/color_mean_std.yaml
+    label_db_filepath: data/processed/scannet200/label_database.yaml
+    color_mean_std: data/processed/scannet200/color_mean_std.yaml
     data_percent: 1.0
     mode: ${data.test_mode}
     ignore_label: ${data.ignore_label}
@@ -168,18 +160,14 @@ data:
     add_colors: ${data.add_colors}
     add_normals: ${data.add_normals}
     add_instance: ${data.add_instance}
-    sam_folder: ${data.sam_folder}
     cropping: false
     is_tta: false
     crop_min_size: ${data.crop_min_size}
     crop_length: ${data.crop_length}
     filter_out_classes: []
     label_offset: 0
-    scenes_to_exclude: ${data.scenes_to_exclude}
-    max_frames: ${data.max_frames}
-    label_min_area: ${data.label_min_area}
   train_collation:
-    _target_: datasets.utils.VoxelizeCollate
+    _target_: datasets.utils_stage2.VoxelizeCollate
     ignore_label: ${data.ignore_label}
     voxel_size: ${data.voxel_size}
     mode: ${data.train_mode}
@@ -192,8 +180,11 @@ data:
     filter_out_classes: ${data.train_dataset.filter_out_classes}
     label_offset: ${data.train_dataset.label_offset}
     num_queries: ${model.num_queries}
+    generate_masks_path: ${data.generate_masks_path}
+    use_masks_th: ${data.use_masks_th}
+    use_masks_score: ${data.use_masks_score}
   validation_collation:
-    _target_: datasets.utils.VoxelizeCollate
+    _target_: datasets.utils_stage2.VoxelizeCollate
     ignore_label: ${data.ignore_label}
     voxel_size: ${data.voxel_size}
     mode: ${data.validation_mode}
@@ -204,8 +195,11 @@ data:
     filter_out_classes: ${data.validation_dataset.filter_out_classes}
     label_offset: ${data.validation_dataset.label_offset}
     num_queries: ${model.num_queries}
+    generate_masks_path: ${data.generate_masks_path}
+    use_masks_th: ${data.use_masks_th}
+    use_masks_score: ${data.use_masks_score}
   test_collation:
-    _target_: datasets.utils.VoxelizeCollate
+    _target_: datasets.utils_stage2.VoxelizeCollate
     ignore_label: ${data.ignore_label}
     voxel_size: ${data.voxel_size}
     mode: ${data.test_mode}
@@ -216,6 +210,9 @@ data:
     filter_out_classes: ${data.test_dataset.filter_out_classes}
     label_offset: ${data.test_dataset.label_offset}
     num_queries: ${model.num_queries}
+    generate_masks_path: ${data.generate_masks_path}
+    use_masks_th: ${data.use_masks_th}
+    use_masks_score: ${data.use_masks_score}
 logging:
 - _target_: pytorch_lightning.loggers.WandbLogger
   project: ${general.project_name}
@@ -228,7 +225,7 @@ model:
   _target_: models.Mask3D
   hidden_dim: 128
   dim_feedforward: 1024
-  num_queries: 100
+  num_queries: 150
   num_heads: 8
   num_decoders: 3
   dropout: 0.0
@@ -279,7 +276,7 @@ metrics:
   ignore_label: ${data.ignore_label}
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 2.0e-05
+  lr: 0.0002
 scheduler:
   scheduler:
     _target_: torch.optim.lr_scheduler.OneCycleLR
@@ -290,12 +287,13 @@ scheduler:
     interval: step
 trainer:
   deterministic: false
-  max_epochs: 20
+  max_epochs: 50
   min_epochs: 1
   resume_from_checkpoint: null
+  check_val_every_n_epoch: 5
   num_sanity_val_steps: 2
-  val_check_interval: 2000
-  log_every_n_steps: 500
+  log_every_n_steps: 5
+  accumulate_grad_batches: 1
 callbacks:
 - _target_: pytorch_lightning.callbacks.ModelCheckpoint
   monitor: val_mean_box_ap_50
@@ -309,7 +307,7 @@ callbacks:
   logging_interval: step
 matcher:
   _target_: models.matcher.HungarianMatcher
-  cost_class: 2.0
+  cost_class: 0.0
   cost_mask: 5.0
   cost_dice: 2.0
   num_points: -1

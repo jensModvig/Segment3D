@@ -96,19 +96,25 @@ def get_model_masks(cfg, model, data, transformer):
         outputs = model.model(data, point2segment=None, raw_coordinates=transformer.raw_coordinates)
     
     masks = outputs["pred_masks"][0].detach().cpu()
-    logits = outputs["pred_logits"][0].detach().cpu()
+    logits = outputs["pred_logits"][0][:, 0].detach().cpu()  # Always take first column
     
-    mask_cls = logits[:, 0] if logits.shape[1] == 1 else logits[:, 1]
+    # Get valid masks (those with at least one point)
     result_pred_mask = (masks > 0).float()
     valid_masks = result_pred_mask.sum(0) > 0
     masks = masks[:, valid_masks]
-    mask_cls = mask_cls[valid_masks]
+    mask_cls = logits[valid_masks]
     result_pred_mask = result_pred_mask[:, valid_masks]
     
-    scores = mask_cls.sigmoid() * (masks.float().sigmoid() * result_pred_mask).sum(0) / (result_pred_mask.sum(0) + 1e-6)
+    # Calculate scores using the same approach as reference implementation
+    heatmap = masks.float().sigmoid()  # Apply sigmoid to masks to get heatmap
+    mask_scores_per_image = (heatmap * result_pred_mask).sum(0) / (result_pred_mask.sum(0) + 1e-6)
+    scores = mask_cls * mask_scores_per_image  # No sigmoid on mask_cls
+    
+    # Get top-k predictions
     topk_count = min(cfg.general.topk_per_image, len(scores)) if cfg.general.topk_per_image != -1 else len(scores)
     _, topk_indices = scores.topk(topk_count, sorted=True)
     
+    # Return just the masks (matching the original return format)
     return [(masks[:, idx][transformer.inverse_map].sigmoid().numpy() > 0.5).astype(np.float32) 
             for idx in topk_indices]
 
