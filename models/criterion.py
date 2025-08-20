@@ -40,8 +40,8 @@ def dice_loss_with_confidence(
     inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
     
-    # importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
-    importance = target_confidence
+    importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
+    # importance = target_confidence
     numerator = 2 * (inputs * targets * importance).sum(-1)
     denominator = (inputs * importance).sum(-1) + (targets * importance).sum(-1)
     
@@ -90,8 +90,8 @@ def sigmoid_ce_loss_with_confidence(
     loss = F.binary_cross_entropy_with_logits(
         inputs, targets, reduction="none"
     )
-    # importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
-    importance = target_confidence
+    importance = 4*target_confidence*target_confidence - 4*target_confidence + 1
+    # importance = target_confidence
     loss = loss * importance
 
     return loss.mean(1).sum() / num_masks

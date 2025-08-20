@@ -367,8 +367,8 @@ class Stage1DatasetConf(Dataset):
         sam_groups = sam_groups[valid_depth_mask]
         confidence = confidence[valid_depth_mask]
         
-        # # label low confidence as noise/unique label id
-        # sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
+        # label low confidence as noise/unique label id
+        sam_groups[confidence < 0.5] = np.max(sam_groups) + 1
 
         depth_shift = 1000.0
         x,y = np.meshgrid(np.linspace(0,depth_image.shape[1]-1,depth_image.shape[1]), np.linspace(0,depth_image.shape[0]-1,depth_image.shape[0]))
