@@ -20,6 +20,7 @@ import yaml
 import cv2
 import copy
 import time
+import matplotlib.pyplot as plt
 
 
 # from yaml import CLoader as Loader
@@ -28,6 +29,9 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 
+def generate_colors(n):
+    import colorsys
+    return np.array([colorsys.hsv_to_rgb((i * 0.618034) % 1.0, 0.8, 0.9) for i in range(n)]) * 255
 
 
 class Stage1DatasetConf(Dataset):
@@ -414,9 +418,26 @@ class Stage1DatasetConf(Dataset):
             axis=1
         ) # (N, 2) (zeros, sam_labels)
         confidence = confidence.reshape(-1, 1) # (N, 1)
+        
+        # Create SAM + confidence visualization
+        visualization_colors = np.zeros_like(coordinates)
+        unique_sam_labels = np.unique(sam_groups[sam_groups != -1])
+
+        if len(unique_sam_labels) > 0:
+            sam_colors = generate_colors(len(unique_sam_labels))
+            for i, label in enumerate(unique_sam_labels):
+                mask = sam_groups == label
+                visualization_colors[mask] = sam_colors[i]
+
+        # Apply viridis to low confidence areas only
+        confidence_flat = confidence.flatten()
+        low_conf_mask = confidence_flat < 0.5
+        if np.any(low_conf_mask):
+            remapped_conf = 0.5 + (1-confidence_flat[low_conf_mask])
+            visualization_colors[low_conf_mask] = plt.cm.viridis(remapped_conf)[:, :3] * 255
 
         raw_coordinates = coordinates.copy()
-        raw_color = color
+        raw_color = visualization_colors
         raw_normals = normals
 
         if not self.add_colors:

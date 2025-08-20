@@ -337,7 +337,7 @@ class Stage1Dataset(Dataset):
         fname = self.data[idx]
         scene_id, frame_id = fname.split()
         
-        depth_path = scannetpp_data / scene_id / self.depth_folder / f'{frame_id}.png'        
+        depth_path = scannetpp_data / scene_id / self.depth_folder / f'{frame_id}.png'     
         depth_image = cv2.imread(str(depth_path), -1)
         depth_dims = depth_image.shape[:2][::-1]
         

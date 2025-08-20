@@ -1,5 +1,4 @@
 import argparse
-import json
 import colorsys
 import shutil
 import numpy as np
@@ -7,17 +6,12 @@ import open3d as o3d
 import torch
 from pathlib import Path
 from hydra.experimental import initialize, compose
-from demo_utils import get_model, prepare_data
-from datasets.scannetpp_stage1 import ScannetppStage1Dataset
-from datasets.scannetpp import SemanticSegmentationDataset
-from datasets.stage1 import Stage1Dataset as Stage1default
-from datasets.stage1_conf import Stage1Dataset as Stage1conf
-from datasets.stage1_conf_threshold import Stage1DatasetConf as Stage1conf_threshold 
-
-try:
-    from thes.paths import scannetpp_raw_dir
-except ImportError:
-    scannetpp_raw_dir = Path("bigdata/scannetpp")
+from demo_utils import get_model
+from datasets.stage1_conf_visualization import Stage1DatasetConf
+from datasets.stage1 import Stage1Dataset
+from datasets.stage1_conf import Stage1DatasetConf as Stage1DatasetConfBase
+import albumentations as A
+import MinkowskiEngine as ME
 
 
 def generate_colors(n):
@@ -31,78 +25,96 @@ def save_pcd(coords, colors, path):
     o3d.io.write_point_cloud(str(path), pcd)
 
 
-def load_scene_raw(scene_id, frame_id=None):
-    mesh_path = scannetpp_raw_dir / "data" / scene_id / "scans" / "mesh_aligned_0.05.ply"
-    mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-    coords = np.asarray(mesh.vertices)
-    colors = np.asarray(mesh.vertex_colors) * 255 if len(mesh.vertex_colors) else np.full((len(coords), 3), 255)
-    
-    segments_path = mesh_path.parent / "segments.json"
-    segments_anno_path = mesh_path.parent / "segments_anno.json"
-    
-    if segments_path.exists() and segments_anno_path.exists():
-        with open(segments_path) as f:
-            vertex_to_segment = np.array(json.load(f)["segIndices"])
-        with open(segments_anno_path) as f:
-            annotations = json.load(f)
+class ModelSpaceTransformer:
+    def __init__(self, cfg, device):
+        self.voxel_size = cfg.data.voxel_size
+        self.device = device
         
-        segment_to_instance = np.full(vertex_to_segment.max() + 1, -1, dtype=np.int32)
-        for instance_id, anno in enumerate(annotations["segGroups"]):
-            segment_to_instance[np.array(anno["segments"])] = instance_id
+    def prepare_pointcloud(self, mesh):
+        points = np.asarray(mesh.vertices)
+        coords = np.floor(points / self.voxel_size)
+        colors = np.asarray(mesh.vertex_colors) * 255
+        colors = np.squeeze(A.Normalize(
+            mean=(0.47793125906962, 0.4303257521323044, 0.3749598901421883),
+            std=(0.2834475483823543, 0.27566157565723015, 0.27018971370874995)
+        )(image=colors.astype(np.uint8)[np.newaxis, :, :])["image"])
         
-        vertex_to_instance = segment_to_instance[vertex_to_segment]
-        labels = np.column_stack([np.zeros_like(vertex_to_instance), vertex_to_instance])
-    else:
-        labels = np.full((len(coords), 2), -1, dtype=np.int32)
+        self.unique_map, self.inverse_map = ME.utils.sparse_quantize(
+            coordinates=coords, features=colors, return_index=True, 
+            return_inverse=True, return_maps_only=True)
+        
+        coordinates = [torch.from_numpy(coords[self.unique_map]).int()]
+        features = [torch.from_numpy(colors[self.unique_map]).float()]
+        coordinates, *_ = ME.utils.sparse_collate(coords=coordinates, feats=features)
+        features = torch.cat(features, dim=0)
+        self.raw_coordinates = torch.from_numpy(points[self.unique_map]).float().to(self.device)
+        
+        return ME.SparseTensor(coordinates=coordinates, features=features, device=self.device)
+
+
+def get_model_masks(cfg, model, data, transformer):
+    with torch.no_grad():
+        outputs = model.model(data, point2segment=None, raw_coordinates=transformer.raw_coordinates)
     
-    return coords, colors, labels
+    masks = outputs["pred_masks"][0].detach().cpu()
+    logits = outputs["pred_logits"][0][:, 0].detach().cpu()  # Always take first column
+    
+    # Get valid masks (those with at least one point)
+    result_pred_mask = (masks > 0).float()
+    valid_masks = result_pred_mask.sum(0) > 0
+    masks = masks[:, valid_masks]
+    mask_cls = logits[valid_masks]
+    result_pred_mask = result_pred_mask[:, valid_masks]
+    
+    # Calculate scores using the same approach as reference implementation
+    heatmap = masks.float().sigmoid()  # Apply sigmoid to masks to get heatmap
+    mask_scores_per_image = (heatmap * result_pred_mask).sum(0) / (result_pred_mask.sum(0) + 1e-6)
+    scores = mask_cls * mask_scores_per_image  # No sigmoid on mask_cls
+    
+    # Get top-k predictions
+    topk_count = min(cfg.general.topk_per_image, len(scores)) if cfg.general.topk_per_image != -1 else len(scores)
+    scores, topk_indices = scores.topk(topk_count, sorted=True)
+    
+    # Get final binary masks
+    final_masks = []
+    for idx in topk_indices:
+        mask = masks[:, idx][transformer.inverse_map]  # Apply inverse mapping
+        binary_mask = (mask.sigmoid().numpy() > 0.5).astype(bool)
+        final_masks.append(binary_mask)
+    
+    return scores.numpy(), final_masks
 
 
 def infer(model, coords, colors, cfg, device):
-    from albumentations import Normalize
+    transformer = ModelSpaceTransformer(cfg, device)
+    mock_mesh = type('M', (), {'vertices': coords, 'vertex_colors': colors / 255.0})()
+    data = transformer.prepare_pointcloud(mock_mesh)
     
-    normalize = Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-    colors_norm = normalize(image=colors.astype(np.uint8)[None])["image"][0]
+    scores, mask_list = get_model_masks(cfg, model, data, transformer)
     
-    mock_mesh = type('M', (), {
-        'vertices': coords, 'vertex_colors': colors_norm,
-        'has_vertex_normals': lambda: False, 'compute_vertex_normals': lambda: None
-    })()
-    
-    data, p2s, p2s_full, raw_coords, inv_map = prepare_data(cfg, mock_mesh, None, device)
-    
-    with torch.no_grad():
-        outputs = model(data, point2segment=p2s, raw_coordinates=raw_coords)
-    
-    logits = outputs["pred_logits"][0][:, 0].cpu()
-    masks = outputs["pred_masks"][0].cpu()
-    
-    if cfg.model.train_on_segments and p2s is not None:
-        masks = masks[p2s.cpu()].squeeze(0)
-    
-    valid = (masks > 0).float()
-    keep = valid.sum(0) > 0
-    
-    if keep.sum() == 0:
+    if len(mask_list) == 0:
         return np.array([]), np.zeros((len(coords), 0), dtype=bool)
     
-    masks, scores, valid = masks[:, keep], logits[keep], valid[:, keep]
-    heatmap = masks.sigmoid()
-    mask_scores = (heatmap * valid).sum(0) / (valid.sum(0) + 1e-6)
-    scores = scores * mask_scores
-    
-    masks_full = masks[inv_map]
-    if p2s_full is not None:
-        from torch_scatter import scatter_mean
-        masks_full = scatter_mean(masks_full, p2s_full.squeeze(0), dim=0)
-        masks_full = (masks_full > 0.5).float()[p2s_full.squeeze(0)]
-    
-    return scores.numpy(), (masks_full.T > 0).numpy()
+    masks = np.stack(mask_list).T
+    return scores, masks
+
+
+def load_with_confidence_filtering(scene_id, frame_id):
+    coords, colors, labels = Stage1DatasetConfBase.load_specific_frame(
+        scene_id, frame_id, depth_folder='depth_pro/depth_map_fpxc_640x480'
+    )
+    confidence = labels[:, 3]
+    confidence_mask = confidence >= 0.5
+    return coords[confidence_mask], colors[confidence_mask], labels[confidence_mask]
 
 
 def process_dataset(name, loader, scene_id, frame_id, model, cfg, device, output_dir):
-    coords, colors, labels = loader(scene_id, frame_id)
-    prefix = f"{scene_id}_{frame_id}_{name}" if frame_id else f"{scene_id}_{name}"
+    if name == "sam_confidence_filtered":
+        coords, colors, labels = load_with_confidence_filtering(scene_id, frame_id)
+    else:
+        coords, colors, labels = loader(scene_id, frame_id)
+    
+    prefix = f"{scene_id}_{frame_id}_{name}"
     
     save_pcd(coords, colors, output_dir / f"{prefix}_rgb.pcd")
     
@@ -119,11 +131,18 @@ def process_dataset(name, loader, scene_id, frame_id, model, cfg, device, output
             save_pcd(coords, label_colors, output_dir / f"{prefix}_gt.pcd")
     
     scores, masks = infer(model, coords, colors, cfg, device)
+    
+    valid_indices = [i for i, score in enumerate(scores) if score > 0.7]
+    if valid_indices:
+        scores, masks = scores[valid_indices], masks[:, valid_indices]
+    else:
+        scores, masks = np.array([]), np.array([]).reshape(0, masks.shape[1])
+            
     pred_count = len(scores)
     if pred_count > 0:
         pred_colors = np.zeros_like(coords)
         palette = generate_colors(pred_count)
-        for i, mask in enumerate(masks):
+        for i, mask in enumerate(masks.T):
             pred_colors[mask] = palette[i]
         save_pcd(coords, pred_colors, output_dir / f"{prefix}_pred.pcd")
     
@@ -148,65 +167,23 @@ def main():
         cfg = compose(config_name="config_base_instance_segmentation.yaml")
     
     cfg.general.checkpoint = args.checkpoint
+    cfg.general.train_on_segments = False
+    cfg.model.num_queries = 100
+    cfg.general.topk_per_image = 100
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(cfg).eval().to(device)
     
     datasets = [
-        ("scannetpp_gt_stage1", lambda s, f: ScannetppStage1Dataset.load_specific_frame(s, f)),
-        # ("stage1_gt_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
-        #     scene_id=s,
-        #     frame_id=f,
-        #     sam_folder='gt_mask',
-        #     color_folder='iphone/rgb',
-        #     depth_folder='depth_pro/depth_map_fpx_256x192',
-        #     intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
-        # )),
-        # ("stage1_gt_depth640", lambda s, f: Stage1default.load_specific_frame(
-        #     scene_id=s,
-        #     frame_id=f,
-        #     sam_folder='sam',
-        #     color_folder='iphone/rgb',
-        #     depth_folder='depth_pro/depth_map_fpx_640x480',
-        #     intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
-        # )),
-        ("stage1_gt_depth640_conf", lambda s, f: Stage1conf.load_specific_frame(
-            scene_id=s,
-            frame_id=f,
-            sam_folder='gt_mask',
-            color_folder='iphone/rgb',
-            depth_folder='depth_pro/depth_map_fpx_640x480',
-            intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
+        ("scannetpp_raw", lambda s, f: Stage1Dataset.load_specific_frame(
+            scene_id=s, frame_id=f, sam_folder='sam', color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpx_640x480', intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
         )),
-        ("stage1_gt_depth640_conf_thresh", lambda s, f: Stage1conf_threshold.load_specific_frame(
-            scene_id=s,
-            frame_id=f,
-            sam_folder='gt_mask',
-            color_folder='iphone/rgb',
-            depth_folder='depth_pro/depth_map_fpx_640x480',
-            intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
-        )),
-        # ("stage1_sam_depth256", lambda s, f: Stage1Dataset.load_specific_frame(
-        #     scene_id=s,
-        #     frame_id=f,
-        #     sam_folder='sam',
-        #     color_folder='iphone/rgb',
-        #     depth_folder='depth_pro/depth_map_fpx_256x192',
-        #     intrinsic_folder='depth_pro/intrinsics_fpx_256x192'
-        # )),
-        # ("stage1_sam_depth640", lambda s, f: Stage1Dataset.load_specific_frame(
-        #     scene_id=s,
-        #     frame_id=f,
-        #     sam_folder='sam',
-        #     color_folder='iphone/rgb',
-        #     depth_folder='depth_pro/depth_map_fpx_640x480',
-        #     intrinsic_folder='depth_pro/intrinsics_fpx_640x480'
-        # )),
-        # ("preprocessed", lambda s, f: SemanticSegmentationDataset.load_specific_scene(s)),
-        # ("raw", load_scene_raw),
+        ("sam_confidence_viz", lambda s, f: Stage1DatasetConf.load_specific_frame(
+            scene_id=s, frame_id=f, sam_folder='sam', color_folder='iphone/rgb',
+            depth_folder='depth_pro/depth_map_fpxc_640x480', intrinsic_folder='depth_pro/intrinsics_fpxc_640x480'
+        ))
     ]
-    
-    dataset_names = [name for name, _ in datasets]
-    assert len(dataset_names) == len(set(dataset_names)), f"Duplicate dataset names found: {[name for name in dataset_names if dataset_names.count(name) > 1]}"
     
     success_count = sum(process_dataset(name, loader, args.scene_id, args.frame_id, 
                                       model, cfg, device, output_dir) 
