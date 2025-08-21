@@ -12,6 +12,38 @@ from PIL import Image
 import glob
 from cuml.cluster import DBSCAN
 import copy
+from typing import List, Tuple
+
+
+def find_contained_masks(masks: np.ndarray, containers: np.ndarray, iou_threshold: float = 0.9) -> Tuple[List[List[np.ndarray]], List[np.ndarray]]:
+    """Find masks contained within container masks based on IoU threshold."""
+    n_masks, w = masks.shape
+    n_containers = containers.shape[0]
+    
+    if containers.shape[1:] != (w,):
+        raise ValueError(f"Shape mismatch: masks {masks.shape} vs containers {containers.shape}")
+    
+    contained_by_container = [[] for _ in range(n_containers)]
+    contained_indices = set()
+    
+    for container_idx in range(n_containers):
+        container = containers[container_idx].astype(bool)
+        
+        for mask_idx in range(n_masks):
+            if mask_idx in contained_indices:
+                continue
+                
+            mask = masks[mask_idx].astype(bool)
+            intersection = np.sum(mask & container)
+            mask_area = np.sum(mask)
+            
+            if mask_area > 0 and (intersection / mask_area) > iou_threshold:
+                contained_by_container[container_idx].append(mask)
+                contained_indices.add(mask_idx)
+    
+    remaining_masks = [masks[i] for i in range(n_masks) if i not in contained_indices]
+    
+    return contained_by_container, remaining_masks
 
 
 class ModelSpaceTransformer:
@@ -96,39 +128,6 @@ def get_depth_mask(scene_id, frame_id, depth_resolution):
     depth_data = np.load(str(depth_path))
     return (depth_data['depth'] != 0)
 
-import numpy as np
-from typing import List, Tuple
-
-def find_contained_masks(masks: np.ndarray, containers: np.ndarray, iou_threshold: float = 0.9) -> Tuple[List[List[np.ndarray]], List[np.ndarray]]:
-    """Find masks contained within container masks based on IoU threshold."""
-    n_masks, w = masks.shape
-    n_containers = containers.shape[0]
-    
-    if containers.shape[1:] != (w,):
-        raise ValueError(f"Shape mismatch: masks {masks.shape} vs containers {containers.shape}")
-    
-    contained_by_container = [[] for _ in range(n_containers)]
-    contained_indices = set()
-    
-    for container_idx in range(n_containers):
-        container = containers[container_idx].astype(bool)
-        
-        for mask_idx in range(n_masks):
-            if mask_idx in contained_indices:
-                continue
-                
-            mask = masks[mask_idx].astype(bool)
-            intersection = np.sum(mask & container)
-            mask_area = np.sum(mask)
-            
-            if mask_area > 0 and (intersection / mask_area) > iou_threshold:
-                contained_by_container[container_idx].append(mask)
-                contained_indices.add(mask_idx)
-    
-    remaining_masks = [masks[i] for i in range(n_masks) if i not in contained_indices]
-    
-    return contained_by_container, remaining_masks
-
 
 def get_model_masks(cfg, model, data, transformer):
     with torch.no_grad():
@@ -194,21 +193,37 @@ def select_and_merge_masks(model_masks, sam_labels_3d, selection_threshold, merg
     selected_in_sam, _ = find_contained_masks(selected_array, sam_array, iou_threshold=0.9)
     sam_in_selected, _ = find_contained_masks(sam_array, selected_array, iou_threshold=0.9)
     
+    # Track used masks
+    used_sam_indices = set()
+    used_selected_indices = set()
+    
     # Merge contained masks with containers
     merged_set1 = []
     for container_idx, contained_masks in enumerate(selected_in_sam):
         if contained_masks:
             merged_mask = sam_masks[container_idx].copy()
+            used_sam_indices.add(container_idx)
             for contained_mask in contained_masks:
                 merged_mask = np.logical_or(merged_mask, contained_mask).astype(np.float32)
+                # Find and mark selected mask as used
+                for i, sel_mask in enumerate(selected_masks):
+                    if np.array_equal(sel_mask, contained_mask):
+                        used_selected_indices.add(i)
+                        break
             merged_set1.append(merged_mask)
     
     merged_set2 = []
     for container_idx, contained_masks in enumerate(sam_in_selected):
         if contained_masks:
             merged_mask = selected_masks[container_idx].copy()
+            used_selected_indices.add(container_idx)
             for contained_mask in contained_masks:
                 merged_mask = np.logical_or(merged_mask, contained_mask).astype(np.float32)
+                # Find and mark sam mask as used
+                for i, sam_mask in enumerate(sam_masks):
+                    if np.array_equal(sam_mask, contained_mask):
+                        used_sam_indices.add(i)
+                        break
             merged_set2.append(merged_mask)
     
     # Final merge between sets based on IoU > 0.5
@@ -223,11 +238,37 @@ def select_and_merge_masks(model_masks, sam_labels_3d, selection_threshold, merg
                 if iou > best_iou:
                     best_iou, best_idx = iou, idx
         
-        if best_iou > 0.5:
+        if best_iou > 0.9:
             final_masks[best_idx] = np.logical_or(final_masks[best_idx], mask1).astype(np.float32)
             used_indices.add(best_idx)
         else:
             final_masks.append(mask1)
+    
+    # Collect unused masks
+    unused_masks = []
+    for i, mask in enumerate(sam_masks):
+        if i not in used_sam_indices:
+            unused_masks.append(mask)
+    for i, mask in enumerate(selected_masks):
+        if i not in used_selected_indices:
+            unused_masks.append(mask)
+    
+    # Calculate missing area (where no final mask exists)
+    missing_area = np.ones(len(sam_labels_3d), dtype=bool)
+    for mask in final_masks:
+        missing_area &= (mask == 0)
+    
+    # Find unused masks contained in missing area and sort by size
+    contained_in_missing = []
+    for mask in unused_masks:
+        intersection = np.sum((mask > 0) & missing_area)
+        mask_area = np.sum(mask > 0)
+        if mask_area > 0 and (intersection / mask_area) > 0.9:
+            contained_in_missing.append((mask, mask_area))
+    
+    # Sort by size (largest first) and add to final masks
+    contained_in_missing.sort(key=lambda x: x[1], reverse=True)
+    final_masks.extend([mask for mask, _ in contained_in_missing])
     
     return final_masks
 
@@ -298,6 +339,7 @@ def main():
         cfg = compose(config_name="config_base_instance_segmentation.yaml")
     
     cfg.general.checkpoint = args.checkpoint
+    cfg.model.num_queries = 400
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = get_model(cfg).eval().to(device)
     
