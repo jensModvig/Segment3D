@@ -11,6 +11,7 @@ import cv2
 from PIL import Image
 import glob
 from cuml.cluster import DBSCAN
+import copy
 
 
 class ModelSpaceTransformer:
@@ -55,7 +56,22 @@ def get_iteration_number(scene_id, frame_id, shared_folder):
     return max(iterations) + 1
 
 
+def num_to_natural(group_ids):
+    '''
+    Change the group number to natural number arrangement
+    '''
+    if np.all(group_ids == -1):
+        return group_ids
+    array = copy.deepcopy(group_ids)
+    unique_values = np.unique(array[array != -1])
+    mapping = np.full(np.max(unique_values) + 2, -1)
+    mapping[unique_values + 1] = np.arange(len(unique_values))
+    array = mapping[array + 1]
+    return array
+
+
 def load_sam_labels_3d(scene_id, frame_id, input_path, depth_resolution):
+    """Load and process SAM labels, remapping them to consecutive integers."""
     data_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/')
     depth_path = data_path / scene_id / f'depth_pro/depth_map_fpxc_{depth_resolution}' / f'{frame_id}.npz'
     
@@ -66,29 +82,52 @@ def load_sam_labels_3d(scene_id, frame_id, input_path, depth_resolution):
     
     depth_data = np.load(str(depth_path))
     depth_image = depth_data['depth']
-    sam_groups = cv2.resize(np.array(Image.open(input_path), dtype=np.int16), 
-                           depth_image.shape[::-1], interpolation=cv2.INTER_NEAREST)
+    sam_groups = cv2.resize(
+        np.array(Image.open(input_path), dtype=np.int16), 
+        depth_image.shape[::-1], 
+        interpolation=cv2.INTER_NEAREST
+    )[depth_image != 0]
     
-    sam_groups = sam_groups[depth_image != 0]
-    
-    if np.all(sam_groups == -1):
-        return sam_groups, []
-    
-    unique_values = np.unique(sam_groups[sam_groups != -1])
-    mapping = np.full(np.max(unique_values) + 2, -1)
-    mapping[unique_values + 1] = np.arange(len(unique_values))
-    sam_labels_3d = mapping[sam_groups + 1]
-    
-    valid_sam_ids = np.unique(sam_labels_3d)
-    valid_sam_ids = valid_sam_ids[valid_sam_ids != -1]
-    
-    return sam_labels_3d, valid_sam_ids
+    return num_to_natural(sam_groups)
 
 
 def get_depth_mask(scene_id, frame_id, depth_resolution):
     depth_path = Path('/work3/s173955/bigdata/processed/scannetpp/data/') / scene_id / f'depth_pro/depth_map_fpxc_{depth_resolution}' / f'{frame_id}.npz'
     depth_data = np.load(str(depth_path))
     return (depth_data['depth'] != 0)
+
+import numpy as np
+from typing import List, Tuple
+
+def find_contained_masks(masks: np.ndarray, containers: np.ndarray, iou_threshold: float = 0.9) -> Tuple[List[List[np.ndarray]], List[np.ndarray]]:
+    """Find masks contained within container masks based on IoU threshold."""
+    n_masks, w = masks.shape
+    n_containers = containers.shape[0]
+    
+    if containers.shape[1:] != (w,):
+        raise ValueError(f"Shape mismatch: masks {masks.shape} vs containers {containers.shape}")
+    
+    contained_by_container = [[] for _ in range(n_containers)]
+    contained_indices = set()
+    
+    for container_idx in range(n_containers):
+        container = containers[container_idx].astype(bool)
+        
+        for mask_idx in range(n_masks):
+            if mask_idx in contained_indices:
+                continue
+                
+            mask = masks[mask_idx].astype(bool)
+            intersection = np.sum(mask & container)
+            mask_area = np.sum(mask)
+            
+            if mask_area > 0 and (intersection / mask_area) > iou_threshold:
+                contained_by_container[container_idx].append(mask)
+                contained_indices.add(mask_idx)
+    
+    remaining_masks = [masks[i] for i in range(n_masks) if i not in contained_indices]
+    
+    return contained_by_container, remaining_masks
 
 
 def get_model_masks(cfg, model, data, transformer):
@@ -125,8 +164,10 @@ def calculate_iou(mask1, mask2):
     return intersection / union if union > 0 else 0.0
 
 
-def select_and_merge_masks(model_masks, sam_labels_3d, sam_ids, selection_threshold, merge_threshold):
+def select_and_merge_masks(model_masks, sam_labels_3d, selection_threshold, merge_threshold):
     selected_masks = []
+    
+    sam_ids = np.unique(sam_labels_3d[sam_labels_3d != -1])
     
     for sam_id in sam_ids:
         sam_binary = (sam_labels_3d == sam_id).astype(np.float32)
@@ -143,30 +184,52 @@ def select_and_merge_masks(model_masks, sam_labels_3d, sam_ids, selection_thresh
     if not selected_masks:
         return []
     
-    groups, used = [], set()
-    for i, mask1 in enumerate(selected_masks):
-        if i in used:
-            continue
-        group = [i]
-        used.add(i)
+    # Extract SAM masks
+    sam_masks = [(sam_labels_3d == sam_id).astype(np.float32) for sam_id in sam_ids]
+    
+    selected_array = np.stack(selected_masks)
+    sam_array = np.stack(sam_masks)
+    
+    # Find containments both ways
+    selected_in_sam, _ = find_contained_masks(selected_array, sam_array, iou_threshold=0.9)
+    sam_in_selected, _ = find_contained_masks(sam_array, selected_array, iou_threshold=0.9)
+    
+    # Merge contained masks with containers
+    merged_set1 = []
+    for container_idx, contained_masks in enumerate(selected_in_sam):
+        if contained_masks:
+            merged_mask = sam_masks[container_idx].copy()
+            for contained_mask in contained_masks:
+                merged_mask = np.logical_or(merged_mask, contained_mask).astype(np.float32)
+            merged_set1.append(merged_mask)
+    
+    merged_set2 = []
+    for container_idx, contained_masks in enumerate(sam_in_selected):
+        if contained_masks:
+            merged_mask = selected_masks[container_idx].copy()
+            for contained_mask in contained_masks:
+                merged_mask = np.logical_or(merged_mask, contained_mask).astype(np.float32)
+            merged_set2.append(merged_mask)
+    
+    # Final merge between sets based on IoU > 0.5
+    final_masks = merged_set1.copy()
+    used_indices = set()
+    
+    for mask1 in merged_set2:
+        best_iou, best_idx = 0, -1
+        for idx, mask2 in enumerate(final_masks):
+            if idx not in used_indices:
+                iou = calculate_iou(mask1, mask2)
+                if iou > best_iou:
+                    best_iou, best_idx = iou, idx
         
-        for j, mask2 in enumerate(selected_masks[i+1:], i+1):
-            if j not in used and calculate_iou(mask1, mask2) > merge_threshold:
-                group.append(j)
-                used.add(j)
-        groups.append(group)
-    
-    merged_masks = []
-    for group in groups:
-        if len(group) == 1:
-            merged_masks.append(selected_masks[group[0]])
+        if best_iou > 0.5:
+            final_masks[best_idx] = np.logical_or(final_masks[best_idx], mask1).astype(np.float32)
+            used_indices.add(best_idx)
         else:
-            merged_mask = np.zeros_like(selected_masks[0])
-            for idx in group:
-                merged_mask = np.logical_or(merged_mask, selected_masks[idx])
-            merged_masks.append(merged_mask.astype(np.float32))
+            final_masks.append(mask1)
     
-    return merged_masks
+    return final_masks
 
 
 def map_to_2d_and_save(masks_3d, depth_mask, output_path):
@@ -179,7 +242,10 @@ def map_to_2d_and_save(masks_3d, depth_mask, output_path):
     for i, mask_3d in enumerate(masks_3d):
         mask_2d_indices = np.full((h, w), False, dtype=bool)
         mask_2d_indices[depth_mask] = mask_3d > 0
-        output_image[mask_2d_indices] = i
+        # 50% transparency: random selection of pixels to write
+        transparency_mask = np.random.random((h, w)) < 0.5
+        final_mask = mask_2d_indices & transparency_mask
+        output_image[final_mask] = i
     
     Image.fromarray(output_image.astype(np.uint16)).save(output_path)
 
@@ -248,13 +314,14 @@ def main():
     transformer = ModelSpaceTransformer(cfg, device)
     data = transformer.prepare_pointcloud(type('M', (), {'vertices': coords_filtered, 'vertex_colors': colors_filtered})())
     
-    sam_labels_3d, sam_ids = load_sam_labels_3d(args.scene_id, args.frame_id, input_path, args.depth_resolution)
+    sam_labels_3d = load_sam_labels_3d(args.scene_id, args.frame_id, input_path, args.depth_resolution)
     sam_labels_3d_filtered = sam_labels_3d[confidence_mask]
     
     model_masks = get_model_masks(cfg, model, data, transformer)
     
+    merged_masks = model_masks
     merged_masks = select_and_merge_masks(
-        model_masks, sam_labels_3d_filtered, sam_ids, 
+        model_masks, sam_labels_3d_filtered, 
         args.selection_iou_threshold, args.merge_iou_threshold
     )
     

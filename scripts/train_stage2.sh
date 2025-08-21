@@ -6,7 +6,7 @@ CURRENT_TIME=$(date +"%Y%m%d_%H%M%S")
 GPU_COUNT=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
 echo "Found $GPU_COUNT GPUs: $CUDA_VISIBLE_DEVICES"
 
-PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 python main_instance_segmentation_stage2.py \
+python main_instance_segmentation_stage2.py \
     general.experiment_name="train2_${CURRENT_TIME}" \
     general.project_name="train2_scannet" \
     optimizer.lr=0.0002 \
